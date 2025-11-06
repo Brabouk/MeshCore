@@ -11,7 +11,6 @@ void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected reason=%d", reason);
   if(instance){
     instance->_isDeviceConnected = false;
-    instance->startAdv();
   }
 }
 
@@ -85,7 +84,7 @@ void SerialBLEInterface::startAdv() {
    * For recommended advertising interval
    * https://developer.apple.com/library/content/qa/qa1931/_index.html   
    */
-  Bluefruit.Advertising.restartOnDisconnect(false); // don't restart automatically as we handle it in onDisconnect
+  Bluefruit.Advertising.restartOnDisconnect(true);  // let the SoftDevice restart advertising after disconnect
   Bluefruit.Advertising.setInterval(32, 244);
   Bluefruit.Advertising.setFastTimeout(30);      // number of seconds in fast mode
   Bluefruit.Advertising.start(0);                // 0 = Don't stop advertising after n seconds
