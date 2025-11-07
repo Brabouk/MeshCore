@@ -11,7 +11,6 @@ void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected reason=%d", reason);
   if(instance){
     instance->_isDeviceConnected = false;
-    instance->startAdv();
   }
 }
 
@@ -31,7 +30,6 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
   sprintf(charpin, "%d", pin_code);
 
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  Bluefruit.configPrphConn(250, BLE_GAP_EVENT_LENGTH_MIN, 16, 16);  // increase MTU
   Bluefruit.setTxPower(BLE_TX_POWER);
   Bluefruit.begin();
   Bluefruit.setName(device_name);
@@ -85,7 +83,7 @@ void SerialBLEInterface::startAdv() {
    * For recommended advertising interval
    * https://developer.apple.com/library/content/qa/qa1931/_index.html   
    */
-  Bluefruit.Advertising.restartOnDisconnect(false); // don't restart automatically as we handle it in onDisconnect
+  Bluefruit.Advertising.restartOnDisconnect(true);  // let the SoftDevice restart advertising after disconnect
   Bluefruit.Advertising.setInterval(32, 244);
   Bluefruit.Advertising.setFastTimeout(30);      // number of seconds in fast mode
   Bluefruit.Advertising.start(0);                // 0 = Don't stop advertising after n seconds
