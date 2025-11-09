@@ -110,14 +110,7 @@ int RadioLibWrapper::recvRaw(uint8_t* bytes, int sz) {
         n_recv++;
       }
     }
-    // Immediately re-arm RX to minimize gap between packets
-    int rxErr = _radio->startReceive();
-    if (rxErr == RADIOLIB_ERR_NONE) {
-      state = STATE_RX;
-    } else {
-      state = STATE_IDLE;   // fallback: will re-arm in subsequent check
-      MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startReceive(%d)", rxErr);
-    }
+    state = STATE_IDLE;   // need another startReceive()
   }
 
   if (state != STATE_RX) {
@@ -143,13 +136,7 @@ bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
     return true;
   }
   MESH_DEBUG_PRINTLN("RadioLibWrapper: error: startTransmit(%d)", err);
-  // Immediately try to return to RX to avoid missing packets on TX failure
-  int rxErr = _radio->startReceive();
-  if (rxErr == RADIOLIB_ERR_NONE) {
-    state = STATE_RX;
-  } else {
-    idle();   // fallback to standby, loop will re-arm
-  }
+  idle();   // trigger another startRecv()
   return false;
 }
 
