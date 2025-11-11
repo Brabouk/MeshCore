@@ -3,38 +3,36 @@
 
 static SerialBLEInterface* instance;
 
+constexpr size_t kMaxBleChunkSize = 96;
+constexpr uint32_t kWriteIntervalNormalMs = 80;
+constexpr uint32_t kWriteIntervalWeakMs = 140;
+constexpr uint32_t kWriteIntervalCriticalMs = 220;
+
 void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: connected");
-  // we now set _isDeviceConnected=true in onSecured callback instead
+  if (instance) {
+    instance->_connHandle = connection_handle;
+  }
 }
 
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected reason=0x%02X", reason);
-  if(instance){
-    if (reason == BLE_HCI_CONNECTION_TIMEOUT) {
-      BLE_DEBUG_PRINTLN("SerialBLEInterface: timeout detected, sweeping lingering handles");
-      uint16_t handles[4];
-      int count = Bluefruit.getConnectedHandles(handles, 4);
-      for (int i = 0; i < count; i++) {
-        BLE_DEBUG_PRINTLN("SerialBLEInterface: forcing disconnect handle=%d", handles[i]);
-        Bluefruit.disconnect(handles[i]);
-      }
-      // Ensure advertising restarts cleanly even if the stack was wedged.
-      Bluefruit.Advertising.stop();
-      instance->clearBuffers();
-      instance->_isDeviceConnected = false;
-      instance->startAdv();
-    } else {
-      instance->clearBuffers();
-      instance->_isDeviceConnected = false;
-    }
-    }
+  (void)connection_handle;
+  if (instance){
+    instance->_isDeviceConnected = false;
+    instance->_connHandle = BLE_CONN_HANDLE_INVALID;
+    instance->_last_write = 0;
+    instance->clearBuffers();
+    // Advertising auto-restarts via restartOnDisconnect(true). If that fails,
+    // the main loop will kick it off again on the next enable().
+  }
 }
 
 void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: onSecured");
   if(instance){
     instance->_isDeviceConnected = true;
+    instance->_connHandle = connection_handle;
     // no need to stop advertising on connect, as the ble stack does this automatically
   }
 }
@@ -47,7 +45,7 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
   sprintf(charpin, "%d", pin_code);
 
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  Bluefruit.configPrphConn(250, BLE_GAP_EVENT_LENGTH_MIN, 16, 16);  // increase MTU
+  Bluefruit.configPrphConn(128, BLE_GAP_EVENT_LENGTH_MIN, 8, 8);
   Bluefruit.setTxPower(BLE_TX_POWER);
   Bluefruit.begin();
   Bluefruit.setName(device_name);
@@ -128,6 +126,8 @@ void SerialBLEInterface::enable() {
 
   _isEnabled = true;
   clearBuffers();
+  _connHandle = BLE_CONN_HANDLE_INVALID;
+  _last_write = 0;
 
   // Start advertising
   startAdv();
@@ -150,6 +150,11 @@ void SerialBLEInterface::disable() {
   Bluefruit.Advertising.stop();
   Bluefruit.Advertising.clearData();
 
+  _connHandle = BLE_CONN_HANDLE_INVALID;
+  _isDeviceConnected = false;
+  _last_write = 0;
+  clearBuffers();
+
   stopAdv();
 }
 
@@ -165,8 +170,10 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
       return 0;
     }
 
-    send_queue[send_queue_len].len = len;  // add to send queue
-    memcpy(send_queue[send_queue_len].buf, src, len);
+    Frame& slot = send_queue[send_queue_len];
+    slot.len = len;          // add to send queue
+    slot.pos = 0;
+    memcpy(slot.buf, src, len);
     send_queue_len++;
 
     return len;
@@ -174,23 +181,30 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   return 0;
 }
 
-#define  BLE_WRITE_MIN_INTERVAL   60
-
 bool SerialBLEInterface::isWriteBusy() const {
-  return millis() < _last_write + BLE_WRITE_MIN_INTERVAL;   // still too soon to start another write?
+  return millis() < _last_write + computeWriteInterval();   // still too soon to start another write?
 }
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
-  if (send_queue_len > 0   // first, check send queue
-    && millis() >= _last_write + BLE_WRITE_MIN_INTERVAL    // space the writes apart
-  ) {
-    _last_write = millis();
-    bleuart.write(send_queue[0].buf, send_queue[0].len);
-    BLE_DEBUG_PRINTLN("writeBytes: sz=%d, hdr=%d", (uint32_t)send_queue[0].len, (uint32_t) send_queue[0].buf[0]);
-
-    send_queue_len--;
-    for (int i = 0; i < send_queue_len; i++) {   // delete top item from queue
-      send_queue[i] = send_queue[i + 1];
+  unsigned long now = millis();
+  if (send_queue_len > 0) {   // first, check send queue
+    uint32_t interval = computeWriteInterval();
+    if (now >= _last_write + interval) {    // space the writes apart
+      Frame& frame = send_queue[0];
+      size_t remaining = frame.len - frame.pos;
+      size_t chunk = remaining > kMaxBleChunkSize ? kMaxBleChunkSize : remaining;
+      if (chunk > 0) {
+        _last_write = now;
+        bleuart.write(frame.buf + frame.pos, chunk);
+        BLE_DEBUG_PRINTLN("writeBytes: sz=%d/%d hdr=%d", (uint32_t)chunk, (uint32_t)frame.len, (uint32_t) frame.buf[0]);
+        frame.pos += chunk;
+        if (frame.pos >= frame.len) {
+          send_queue_len--;
+          for (int i = 0; i < send_queue_len; i++) {   // delete top item from queue
+            send_queue[i] = send_queue[i + 1];
+          }
+        }
+      }
     }
   } else {
     int len = bleuart.available();
@@ -205,4 +219,29 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
 
 bool SerialBLEInterface::isConnected() const {
   return _isDeviceConnected;
+}
+
+uint32_t SerialBLEInterface::computeWriteInterval() const {
+  if (!_isDeviceConnected) {
+    return kWriteIntervalNormalMs;
+  }
+
+  if (send_queue_len == 0) {
+    return kWriteIntervalNormalMs;
+  }
+
+  const Frame& frame = send_queue[0];
+  if (send_queue_len > 1) {
+    return kWriteIntervalCriticalMs;
+  }
+
+  if (frame.pos > 0) {
+    return kWriteIntervalWeakMs;
+  }
+
+  if (frame.len > kMaxBleChunkSize) {
+    return kWriteIntervalWeakMs;
+  }
+
+  return kWriteIntervalNormalMs;
 }
