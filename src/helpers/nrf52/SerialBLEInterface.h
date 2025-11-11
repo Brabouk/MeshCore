@@ -12,26 +12,36 @@ class SerialBLEInterface : public BaseSerialInterface {
   bool _isEnabled;
   bool _isDeviceConnected;
   unsigned long _last_write;
+  uint16_t _connHandle;
 
   struct Frame {
-    uint8_t len;
+    uint16_t len;
+    uint16_t pos;
     uint8_t buf[MAX_FRAME_SIZE];
   };
 
-  #define FRAME_QUEUE_SIZE  4
+  #define FRAME_QUEUE_SIZE  2
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
 
-  void clearBuffers() { send_queue_len = 0; }
+  void clearBuffers() {
+    send_queue_len = 0;
+    for (int i = 0; i < FRAME_QUEUE_SIZE; ++i) {
+      send_queue[i].len = 0;
+      send_queue[i].pos = 0;
+    }
+  }
   static void onConnect(uint16_t connection_handle);
   static void onDisconnect(uint16_t connection_handle, uint8_t reason);
   static void onSecured(uint16_t connection_handle);
+  uint32_t computeWriteInterval() const;
 
 public:
   SerialBLEInterface() {
     _isEnabled = false;
     _isDeviceConnected = false;
     _last_write = 0;
+    _connHandle = BLE_CONN_HANDLE_INVALID;
     send_queue_len = 0;
   }
 
