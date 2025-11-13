@@ -1,5 +1,7 @@
 from pathlib import Path
 
+Import("env")  # pylint: disable=undefined-variable
+
 
 def _patch_ble_advertising(source: Path) -> None:
     text = source.read_text()
@@ -46,13 +48,31 @@ def _patch_ble_advertising(source: Path) -> None:
         source.write_text(text)
 
 
-def before_build(env, platform):  # pylint: disable=unused-argument
-    framework_dir = Path(env.get("PLATFORMFW_DIR", ""))
-    if not framework_dir:
+def _apply_bluefruit_patch(target, source, env):  # pylint: disable=unused-argument
+    framework_path = env.get("PLATFORMFW_DIR")
+    if not framework_path:
+        framework_path = env.PioPlatform().get_package_dir("framework-arduinoadafruitnrf52")
+
+    if not framework_path:
+        print("Bluefruit patch: framework directory not found")
         return
 
+    framework_dir = Path(framework_path)
     target = framework_dir / "libraries" / "Bluefruit52Lib" / "src" / "BLEAdvertising.cpp"
     if target.exists():
+        before = target.read_text()
         _patch_ble_advertising(target)
+        after = target.read_text()
+        if before != after:
+            print("Bluefruit patch: applied updates")
+        else:
+            print("Bluefruit patch: already up to date")
+    else:
+        print("Bluefruit patch: target file not found")
+
+
+bluefruit_action = env.VerboseAction(_apply_bluefruit_patch, "")
+env.AddPreAction("$BUILD_DIR/${PROGNAME}.elf", bluefruit_action)
+_apply_bluefruit_patch(None, None, env)
 
 
