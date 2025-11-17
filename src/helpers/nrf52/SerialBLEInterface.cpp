@@ -89,7 +89,6 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
   // Configure, begin, then clear advertising
   Bluefruit.autoConnLed(false);  // Disable connection LED
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
-  Bluefruit.configPrphConn(250, BLE_GAP_EVENT_LENGTH_MIN, 16, 16);  // increase MTU
   Bluefruit.begin();  // Begin before clearing advertising
   Bluefruit.setTxPower(BLE_TX_POWER);
   Bluefruit.setName(device_name);
