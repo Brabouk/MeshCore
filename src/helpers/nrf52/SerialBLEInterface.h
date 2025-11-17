@@ -12,7 +12,7 @@ class SerialBLEInterface : public BaseSerialInterface {
   bool _isEnabled;
   bool _isDeviceConnected;
   uint16_t _connectionHandle;  // Track specific connection handle
-  uint8_t _pending_writes;  // Track pending BLE notifications in SoftDevice queue
+  volatile uint8_t _pending_writes;  // Track pending BLE notifications in SoftDevice queue
   bool _advRestartPending;  // Track if advertising restart is scheduled (iPhone crash prevention)
   uint32_t _advRestartTime;  // Time when advertising should restart (iPhone crash prevention)
 
@@ -22,7 +22,7 @@ class SerialBLEInterface : public BaseSerialInterface {
   };
 
   #define FRAME_QUEUE_SIZE  4
-  #define MAX_PENDING_WRITES 8  // Conservative limit based on configPrphConn hvn_qsize=16
+  #define MAX_PENDING_WRITES 3  // Conservative limit (hvn_qsize=16, but limit to 3 to prevent saturation)
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
 
