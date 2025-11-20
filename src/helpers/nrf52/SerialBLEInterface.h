@@ -12,7 +12,17 @@
 class SerialBLEInterface : public BaseSerialInterface {
   BLEUart bleuart;
   bool _isEnabled;
+  // _isDeviceConnected is only true after security is established (onSecured callback)
+  // It remains false during initial connection and pairing phases
   bool _isDeviceConnected;
+  // _pending_writes: Count of BLE TX operations in flight (SoftDevice HVN queue)
+  // Marked volatile because it's modified in onBLEEvent (BLE event handler context)
+  // and read in checkRecvFrame/isWriteBusy (main loop context).
+  // NOTE: The read-modify-write operations (decrement) in onBLEEvent are not atomic,
+  // but on nRF52 with SoftDevice, BLE events are typically processed in a cooperative
+  // context that doesn't preempt the main loop, making this safe in practice.
+  // If this code is ported to a preemptive RTOS, proper synchronization (mutex/atomic)
+  // would be required.
   volatile uint8_t _pending_writes;
   bool _advRestartPending;
   uint32_t _advRestartTime;

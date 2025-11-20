@@ -94,12 +94,17 @@ void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t a
 }
 
 // BLE event handler - only handles TX completion events to track pending writes
+// This runs in BLE SoftDevice event context, which on nRF52 is typically cooperative
+// (doesn't preempt main loop). The _pending_writes decrement is not atomic, but safe
+// because main loop checks this value via isWriteBusy() which only reads (no RMW).
+// If porting to preemptive RTOS, protect _pending_writes with mutex or use atomic ops.
 void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   if (!instance) return;
   
   if (evt->header.evt_id == BLE_GATTS_EVT_HVN_TX_COMPLETE) {
     if (instance->_pending_writes > 0) {
       uint8_t completed = evt->evt.gatts_evt.params.hvn_tx_complete.count;
+      // Read-modify-write: not atomic, but safe in cooperative BLE event context
       if (instance->_pending_writes >= completed) {
         instance->_pending_writes -= completed;
       } else {
@@ -281,8 +286,9 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
                          _pending_writes);
 
         send_queue_len--;
-        for (int i = 0; i < send_queue_len; i++) {
-          send_queue[i] = send_queue[i + 1];
+        // Shift remaining frames down using memmove (handles overlapping memory correctly)
+        if (send_queue_len > 0) {
+          memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));
         }
       } else {
         // Write failed - keep frame in queue and try again next time
