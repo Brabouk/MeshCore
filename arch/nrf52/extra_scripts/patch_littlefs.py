@@ -13,7 +13,7 @@ Import("env")  # pylint: disable=undefined-variable
 try:
   SCRIPT_DIR = Path(__file__).resolve().parent
 except NameError:
-  SCRIPT_DIR = Path(env.subst("$PROJECT_DIR")) / "extra_scripts"
+  SCRIPT_DIR = Path(env.subst("$PROJECT_DIR")) / "arch" / "nrf52" / "extra_scripts"
 PATCH_DIR = SCRIPT_DIR / "littlefs_patch"
 
 
@@ -71,3 +71,6 @@ def _apply_littlefs_patch(target, source, env):  # pylint: disable=unused-argume
 littlefs_action = env.VerboseAction(_apply_littlefs_patch, "")
 env.AddPreAction("$BUILD_DIR/${PROGNAME}.elf", littlefs_action)
 _apply_littlefs_patch(None, None, env)
+
+
+
