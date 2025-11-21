@@ -6,11 +6,15 @@ static SerialBLEInterface* instance;
 
 void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   (void)connection_handle;  // Unused - we only support one connection
-  BLE_DEBUG_PRINTLN("SerialBLEInterface: connected");
+  BLE_DEBUG_PRINTLN("SerialBLEInterface: connected handle=0x%04X", connection_handle);
   if (instance) {
     instance->_isDeviceConnected = false;
     instance->clearBuffers();
     instance->stopAdv();
+    
+    // Cancel any pending advertising restart since we're now connected
+    instance->_advRestartPending = false;
+    instance->_advRestartTime = 0;
   }
 }
 
@@ -18,9 +22,16 @@ void SerialBLEInterface::onConnect(uint16_t connection_handle) {
 // Clears connection state and drains remaining RX buffer data
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
   (void)connection_handle;  // Unused - we only support one connection
-  BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected reason=%d", reason);
+  BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%d", connection_handle, reason);
   if(instance){
     instance->_isDeviceConnected = false;
+    
+    // Clear any stuck pending writes (TX completions won't come after disconnect)
+    if (instance->_pending_writes > 0) {
+      BLE_DEBUG_PRINTLN("Clearing stuck _pending_writes=%d on disconnect", instance->_pending_writes);
+      instance->_pending_writes = 0;
+    }
+    
     instance->clearBuffers();
     
     // Delay advertising restart to respect grace period
@@ -101,17 +112,117 @@ void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t a
 void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   if (!instance) return;
   
+  // Extract connection handle based on event type
+  uint16_t conn_handle = 0xFFFF;
   if (evt->header.evt_id == BLE_GATTS_EVT_HVN_TX_COMPLETE) {
-    if (instance->_pending_writes > 0) {
-      uint8_t completed = evt->evt.gatts_evt.params.hvn_tx_complete.count;
-      // Read-modify-write: not atomic, but safe in cooperative BLE event context
-      if (instance->_pending_writes >= completed) {
-        instance->_pending_writes -= completed;
-      } else {
-        instance->_pending_writes = 0;
+    conn_handle = evt->evt.gatts_evt.conn_handle;
+  } else if (evt->header.evt_id >= BLE_GAP_EVT_BASE) {
+    conn_handle = evt->evt.gap_evt.conn_handle;
+  }
+  
+  switch (evt->header.evt_id) {
+    case BLE_GATTS_EVT_HVN_TX_COMPLETE: {
+      if (instance->_pending_writes > 0) {
+        uint8_t completed = evt->evt.gatts_evt.params.hvn_tx_complete.count;
+        // Read-modify-write: not atomic, but safe in cooperative BLE event context
+        if (instance->_pending_writes >= completed) {
+          instance->_pending_writes -= completed;
+        } else {
+          instance->_pending_writes = 0;
+        }
+        BLE_DEBUG_PRINTLN("TX complete: %d, pending now: %d", completed, instance->_pending_writes);
       }
-      BLE_DEBUG_PRINTLN("TX complete: %d, pending now: %d", completed, instance->_pending_writes);
+      break;
     }
+    
+    case BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST: {
+      // iOS 13+ sends this during reconnection - we MUST respond or SoftDevice will assert/crash
+      BLE_DEBUG_PRINTLN("CONN_PARAM_UPDATE_REQUEST: handle=0x%04X, min_interval=%d, max_interval=%d, latency=%d, timeout=%d",
+                       conn_handle,
+                       evt->evt.gap_evt.params.conn_param_update_request.conn_params.min_conn_interval,
+                       evt->evt.gap_evt.params.conn_param_update_request.conn_params.max_conn_interval,
+                       evt->evt.gap_evt.params.conn_param_update_request.conn_params.slave_latency,
+                       evt->evt.gap_evt.params.conn_param_update_request.conn_params.conn_sup_timeout);
+      
+      // Accept iOS's requested parameters by calling with NULL (uses PPCP from GAP service)
+      uint32_t err_code = sd_ble_gap_conn_param_update(conn_handle, NULL);
+      if (err_code == NRF_SUCCESS) {
+        BLE_DEBUG_PRINTLN("Accepted CONN_PARAM_UPDATE_REQUEST (using PPCP)");
+      } else {
+        BLE_DEBUG_PRINTLN("ERROR: Failed to accept CONN_PARAM_UPDATE_REQUEST: 0x%08X", err_code);
+      }
+      break;
+    }
+    
+    case BLE_GAP_EVT_CONN_PARAM_UPDATE: {
+      BLE_DEBUG_PRINTLN("CONN_PARAM_UPDATE: handle=0x%04X, interval=%d, latency=%d, timeout=%d",
+                       conn_handle,
+                       evt->evt.gap_evt.params.conn_param_update.conn_params.min_conn_interval,
+                       evt->evt.gap_evt.params.conn_param_update.conn_params.slave_latency,
+                       evt->evt.gap_evt.params.conn_param_update.conn_params.conn_sup_timeout);
+      break;
+    }
+    
+    case BLE_GAP_EVT_PHY_UPDATE_REQUEST: {
+      // iOS may send this during reconnection
+      BLE_DEBUG_PRINTLN("PHY_UPDATE_REQUEST: handle=0x%04X", conn_handle);
+      
+      ble_gap_phys_t phy_params;
+      phy_params.tx_phys = BLE_GAP_PHY_AUTO;
+      phy_params.rx_phys = BLE_GAP_PHY_AUTO;
+      
+      uint32_t err_code = sd_ble_gap_phy_update(conn_handle, &phy_params);
+      if (err_code == NRF_SUCCESS) {
+        BLE_DEBUG_PRINTLN("Accepted PHY_UPDATE_REQUEST");
+      } else {
+        BLE_DEBUG_PRINTLN("ERROR: Failed to accept PHY_UPDATE_REQUEST: 0x%08X", err_code);
+      }
+      break;
+    }
+    
+    case BLE_GAP_EVT_PHY_UPDATE: {
+      BLE_DEBUG_PRINTLN("PHY_UPDATE: handle=0x%04X, tx_phy=%d, rx_phy=%d, status=%d",
+                       conn_handle,
+                       evt->evt.gap_evt.params.phy_update.tx_phy,
+                       evt->evt.gap_evt.params.phy_update.rx_phy,
+                       evt->evt.gap_evt.params.phy_update.status);
+      break;
+    }
+    
+    case BLE_GAP_EVT_DATA_LENGTH_UPDATE_REQUEST: {
+      // iOS may send this during reconnection
+      BLE_DEBUG_PRINTLN("DATA_LENGTH_UPDATE_REQUEST: handle=0x%04X", conn_handle);
+      
+      // Accept with AUTO (let SoftDevice choose optimal values)
+      uint32_t err_code = sd_ble_gap_data_length_update(conn_handle, NULL, NULL);
+      if (err_code == NRF_SUCCESS) {
+        BLE_DEBUG_PRINTLN("Accepted DATA_LENGTH_UPDATE_REQUEST (AUTO)");
+      } else {
+        BLE_DEBUG_PRINTLN("ERROR: Failed to accept DATA_LENGTH_UPDATE_REQUEST: 0x%08X", err_code);
+      }
+      break;
+    }
+    
+    case BLE_GAP_EVT_DATA_LENGTH_UPDATE: {
+      BLE_DEBUG_PRINTLN("DATA_LENGTH_UPDATE: handle=0x%04X, max_tx_octets=%d, max_rx_octets=%d",
+                       conn_handle,
+                       evt->evt.gap_evt.params.data_length_update.effective_params.max_tx_octets,
+                       evt->evt.gap_evt.params.data_length_update.effective_params.max_rx_octets);
+      break;
+    }
+    
+    case BLE_GAP_EVT_TIMEOUT:
+    case BLE_GATTS_EVT_TIMEOUT: {
+      BLE_DEBUG_PRINTLN("TIMEOUT: handle=0x%04X, src=%d", conn_handle, evt->header.evt_id);
+      break;
+    }
+    
+    default:
+      // Log other GAP events for debugging
+      if (evt->header.evt_id >= BLE_GAP_EVT_BASE && evt->header.evt_id < BLE_GAP_EVT_LAST) {
+        BLE_DEBUG_PRINTLN("Unhandled GAP event: 0x%02X (handle=0x%04X)", evt->header.evt_id, conn_handle);
+      }
+      break;
   }
 }
 
@@ -266,7 +377,8 @@ bool SerialBLEInterface::isWriteBusy() const {
 // Returns length of received frame, or 0 if no frame available
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   // Check if we need to restart advertising after grace period
-  if (_advRestartPending && _advRestartTime > 0 && _isEnabled) {
+  // Only restart if not connected and grace period has expired
+  if (_advRestartPending && _advRestartTime > 0 && _isEnabled && !_isDeviceConnected && Bluefruit.connected() == 0) {
     unsigned long time_since_disconnect = millis() - _advRestartTime;
     if (time_since_disconnect >= CONNECT_EVENT_GRACE_PERIOD) {
       BLE_DEBUG_PRINTLN("Grace period expired, restarting advertising");

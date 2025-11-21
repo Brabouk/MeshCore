@@ -1759,6 +1759,12 @@ void MyMesh::checkSerialInterface() {
   }
 
   if (_iter_started) {
+    // Stop sync if connection is lost
+    if (!_serial->isConnected()) {
+      _iter_started = false;
+      return;
+    }
+    
     ContactInfo contact;
     if (_iter.hasNext(this, contact)) {
       if (contact.lastmod > _iter_filter_since) { // apply the 'since' filter

@@ -34,8 +34,8 @@ class SerialBLEInterface : public BaseSerialInterface {
 
   #define FRAME_QUEUE_SIZE  6   // Application-level frame buffer before sending to BLE
   #define MAX_PENDING_WRITES 12  // Limit concurrent writes (SoftDevice HVN queue is 16, leaving 4 slots headroom)
-  #define CONNECT_EVENT_GRACE_PERIOD 3000  // Delay advertising restart for 3s after disconnect to allow iOS/Android to clean up stale connection state
-  // iOS connection supervision timeout can be up to 6s, but most are shorter. 3s is safe without delaying legitimate reconnections.
+  #define CONNECT_EVENT_GRACE_PERIOD 4000  // Delay advertising restart for 4s after disconnect to allow iOS/Android to clean up stale connection state
+  // iOS connection supervision timeout can be up to 6s, but most are shorter. 4s provides more buffer for rapid reconnection scenarios.
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
 
