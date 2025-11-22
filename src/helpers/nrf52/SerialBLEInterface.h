@@ -15,17 +15,6 @@ class SerialBLEInterface : public BaseSerialInterface {
   // _isDeviceConnected is only true after security is established (onSecured callback)
   // It remains false during initial connection and pairing phases
   bool _isDeviceConnected;
-  // _pending_writes: Count of BLE TX operations in flight (SoftDevice HVN queue)
-  // Marked volatile because it's modified in onBLEEvent (BLE event handler context)
-  // and read in checkRecvFrame/isWriteBusy (main loop context).
-  // NOTE: The read-modify-write operations (decrement) in onBLEEvent are not atomic,
-  // but on nRF52 with SoftDevice, BLE events are typically processed in a cooperative
-  // context that doesn't preempt the main loop, making this safe in practice.
-  // If this code is ported to a preemptive RTOS, proper synchronization (mutex/atomic)
-  // would be required.
-  volatile uint8_t _pending_writes;
-  bool _advRestartPending;
-  uint32_t _advRestartTime;
 
   struct Frame {
     uint8_t len;
@@ -33,15 +22,11 @@ class SerialBLEInterface : public BaseSerialInterface {
   };
 
   #define FRAME_QUEUE_SIZE  6   // Application-level frame buffer before sending to BLE
-  #define MAX_PENDING_WRITES 12  // Limit concurrent writes (SoftDevice HVN queue is 16, leaving 4 slots headroom)
-  #define CONNECT_EVENT_GRACE_PERIOD 4000  // Delay advertising restart for 4s after disconnect to allow iOS/Android to clean up stale connection state
-  // iOS connection supervision timeout can be up to 6s, but most are shorter. 4s provides more buffer for rapid reconnection scenarios.
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
 
   void clearBuffers() {
     send_queue_len = 0;
-    _pending_writes = 0;
   }
   static void onConnect(uint16_t connection_handle);
   static void onDisconnect(uint16_t connection_handle, uint8_t reason);
@@ -55,15 +40,8 @@ public:
     _isEnabled = false;
     _isDeviceConnected = false;
     send_queue_len = 0;
-    _pending_writes = 0;
-    _advRestartPending = false;
-    _advRestartTime = 0;
   }
 
-  // Start BLE advertising to allow connections
-  void startAdv();
-  // Stop BLE advertising
-  void stopAdv();
   // Initialize BLE stack, configure security, and set up advertising
   void begin(const char* device_name, uint32_t pin_code);
   // Disconnect all active BLE connections
@@ -79,7 +57,9 @@ public:
   bool isConnected() const override;
 
   // Check if write queue is at capacity
+  // Returns true when queue is full, providing backpressure to callers
   bool isWriteBusy() const override;
+
   // Queue frame for transmission over BLE
   size_t writeFrame(const uint8_t src[], size_t len) override;
   // Process received frames and handle outgoing frame queue
