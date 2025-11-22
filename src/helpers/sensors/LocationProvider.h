@@ -19,8 +19,7 @@ public:
     virtual void sendSentence(const char * sentence);
     virtual void reset() = 0;
     virtual void begin() = 0;
-    virtual void stop() { _time_sync_needed = false; }
+    virtual void stop() = 0;
     virtual void loop() = 0;
     virtual bool isEnabled() = 0;
-    virtual void setAutosyncEnabled(bool enabled) { }
 };

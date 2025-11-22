@@ -46,7 +46,6 @@ struct NodePrefs { // persisted to file
   uint8_t gps_enabled;
   uint32_t gps_interval; // in seconds
   uint8_t advert_loc_policy;
-  uint8_t gps_autosync_enabled;
   uint32_t discovery_mod_timestamp;
   float adc_multiplier;
 };
