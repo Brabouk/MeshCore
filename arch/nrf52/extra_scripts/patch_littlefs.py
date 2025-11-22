@@ -7,6 +7,7 @@ from version 1.6 (used in Adafruit 1.7.0) to version 1.7.2.
 """
 
 from pathlib import Path
+from typing import Tuple
 
 Import("env")  # pylint: disable=undefined-variable
 
@@ -17,22 +18,38 @@ except NameError:
 PATCH_DIR = SCRIPT_DIR / "littlefs_patch"
 
 
-def _copy_if_different(source: Path, target: Path) -> bool:
+def _copy_if_different(source: Path, target: Path) -> Tuple[bool, bool]:
+  """
+  Copy source to target if different.
+  Returns (changed, success) tuple.
+  """
   if not source.exists():
-    return False
+    return (False, False)
 
-  src_data = source.read_bytes()
+  try:
+    src_data = source.read_bytes()
 
-  if not target.exists():
-    target.write_bytes(src_data)
-    return True
+    if not target.exists():
+      target.write_bytes(src_data)
+      # Verify write
+      verify_data = target.read_bytes()
+      if verify_data == src_data:
+        return (True, True)
+      return (False, False)
 
-  dst_data = target.read_bytes()
-  if src_data != dst_data:
-    target.write_bytes(src_data)
-    return True
+    dst_data = target.read_bytes()
+    if src_data != dst_data:
+      target.write_bytes(src_data)
+      # Verify write
+      verify_data = target.read_bytes()
+      if verify_data == src_data:
+        return (True, True)
+      return (False, False)
 
-  return False
+    return (False, True)  # Already up to date
+  except Exception as e:
+    print(f"LittleFS patch: ERROR copying {source.name}: {e}")
+    return (False, False)
 
 
 def _apply_littlefs_patch(target, source, env):  # pylint: disable=unused-argument
@@ -41,7 +58,8 @@ def _apply_littlefs_patch(target, source, env):  # pylint: disable=unused-argume
     framework_path = env.PioPlatform().get_package_dir("framework-arduinoadafruitnrf52")
 
   if not framework_path:
-    print("LittleFS patch: framework directory not found")
+    print("LittleFS patch: ERROR - framework directory not found")
+    env.Exit(1)
     return
 
   framework_dir = Path(framework_path)
@@ -52,20 +70,31 @@ def _apply_littlefs_patch(target, source, env):  # pylint: disable=unused-argume
   }
 
   updated = False
-  for source, target in targets.items():
-    if not source.exists():
-      print(f"LittleFS patch: source missing {source}")
+  patch_failed = False
+  
+  for source_file, target_file in targets.items():
+    if not source_file.exists():
+      print(f"LittleFS patch: ✗ ERROR - source missing {source_file.name}")
+      patch_failed = True
       continue
 
-    changed = _copy_if_different(source, target)
-    status = "updated" if changed else "unchanged"
-    print(f"LittleFS patch: {source.name} {status}")
-    updated |= changed
+    changed, success = _copy_if_different(source_file, target_file)
+    
+    if success:
+      status = "updated" if changed else "unchanged"
+      print(f"LittleFS patch: OK - {source_file.name} {status}")
+      updated |= changed
+    else:
+      print(f"LittleFS patch: FAILED - Failed to patch {source_file.name}")
+      patch_failed = True
 
-  if updated:
-    print("LittleFS patch: applied updates")
+  if patch_failed:
+    print("LittleFS patch: CRITICAL - Patch verification failed! Build aborted.")
+    env.Exit(1)
+  elif updated:
+    print("LittleFS patch: OK - Applied updates")
   else:
-    print("LittleFS patch: already up to date")
+    print("LittleFS patch: OK - Already up to date")
 
 
 littlefs_action = env.VerboseAction(_apply_littlefs_patch, "")

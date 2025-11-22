@@ -808,10 +808,6 @@ void MyMesh::startInterface(BaseSerialInterface &serial) {
 }
 
 void MyMesh::handleCmdFrame(size_t len) {
-  if (!_serial->isConnected()) {
-    return;
-  }
-
   if (cmd_frame[0] == CMD_DEVICE_QEURY && len >= 2) { // sent when app establishes connection
     app_target_ver = cmd_frame[1];                    // which version of protocol does app understand
 
@@ -1745,19 +1741,9 @@ void MyMesh::checkSerialInterface() {
   size_t len = _serial->checkRecvFrame(cmd_frame);
   if (len > 0) {
     handleCmdFrame(len);
-    return;
-  }
-
-  if (_iter_started && !_serial->isConnected()) {
-    _iter_started = false;
-    return;
-  }
-
-  if (_serial->isWriteBusy()) {
-    return;
-  }
-
-  if (_iter_started) {
+  } else if (_iter_started              // check if our ContactsIterator is 'running'
+             && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
+  ) {
     ContactInfo contact;
     if (_iter.hasNext(this, contact)) {
       if (contact.lastmod > _iter_filter_since) { // apply the 'since' filter
@@ -1773,6 +1759,8 @@ void MyMesh::checkSerialInterface() {
       _serial->writeFrame(out_frame, 5);
       _iter_started = false;
     }
+  //} else if (!_serial->isWriteBusy()) {
+  //  checkConnections();    // TODO - deprecate the 'Connections' stuff
   }
 }
 
