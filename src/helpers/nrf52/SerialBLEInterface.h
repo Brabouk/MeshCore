@@ -21,7 +21,7 @@ class SerialBLEInterface : public BaseSerialInterface {
     uint8_t buf[MAX_FRAME_SIZE];
   };
 
-  #define FRAME_QUEUE_SIZE  6   // Application-level frame buffer before sending to BLE
+  #define FRAME_QUEUE_SIZE  8  // Application-level frame buffer before sending to BLE
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
 
