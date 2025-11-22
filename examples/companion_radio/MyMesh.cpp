@@ -347,8 +347,7 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   }
   memcpy(&out_frame[i], from.id.pub_key, 6);
   i += 6; // just 6-byte prefix
-  uint8_t path_len = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
-  out_frame[i++] = path_len;
+  uint8_t path_len = out_frame[i++] = pkt->isRouteFlood() ? pkt->path_len : 0xFF;
   out_frame[i++] = txt_type;
   memcpy(&out_frame[i], &sender_timestamp, 4);
   i += 4;
@@ -809,10 +808,6 @@ void MyMesh::startInterface(BaseSerialInterface &serial) {
 }
 
 void MyMesh::handleCmdFrame(size_t len) {
-  if (!_serial->isConnected()) {
-    return;
-  }
-
   if (cmd_frame[0] == CMD_DEVICE_QEURY && len >= 2) { // sent when app establishes connection
     app_target_ver = cmd_frame[1];                    // which version of protocol does app understand
 
@@ -1746,25 +1741,9 @@ void MyMesh::checkSerialInterface() {
   size_t len = _serial->checkRecvFrame(cmd_frame);
   if (len > 0) {
     handleCmdFrame(len);
-    return;
-  }
-
-  if (_iter_started && !_serial->isConnected()) {
-    _iter_started = false;
-    return;
-  }
-
-  if (_serial->isWriteBusy()) {
-    return;
-  }
-
-  if (_iter_started) {
-    // Stop sync if connection is lost
-    if (!_serial->isConnected()) {
-      _iter_started = false;
-      return;
-    }
-    
+  } else if (_iter_started              // check if our ContactsIterator is 'running'
+             && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
+  ) {
     ContactInfo contact;
     if (_iter.hasNext(this, contact)) {
       if (contact.lastmod > _iter_filter_since) { // apply the 'since' filter
@@ -1780,6 +1759,8 @@ void MyMesh::checkSerialInterface() {
       _serial->writeFrame(out_frame, 5);
       _iter_started = false;
     }
+  //} else if (!_serial->isWriteBusy()) {
+  //  checkConnections();    // TODO - deprecate the 'Connections' stuff
   }
 }
 
