@@ -215,42 +215,50 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 
 // Process received frames, handle outgoing queue, and manage connection state
 // Returns length of received frame, or 0 if no frame available
+// Always drains send queue first (1 frame per call), then checks receive
+// This ensures receive is never blocked, allowing phone requests to be processed even during rapid sending
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
-  if (send_queue_len > 0) {
-    if (isConnected()) {
-      // With semaphore patch, failed writes won't leak semaphores, so safe to just write and remove
-      bleuart.write(send_queue[0].buf, send_queue[0].len);
+  // First, drain send queue (1 frame per call to avoid overwhelming BLE stack)
+  if (send_queue_len > 0 && isConnected()) {
+    size_t written = bleuart.write(send_queue[0].buf, send_queue[0].len);
+    if (written > 0) {
       BLE_DEBUG_PRINTLN("writeBytes: sz=%d, hdr=%d", (uint32_t)send_queue[0].len, (uint32_t)send_queue[0].buf[0]);
 
       send_queue_len--;
-      for (int i = 0; i < send_queue_len; i++) {   // delete top item from queue
-        send_queue[i] = send_queue[i + 1];
+      // Shift remaining frames down using memmove (handles overlapping memory correctly)
+      if (send_queue_len > 0) {
+        memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));
       }
-    }
-    // Note: Callbacks (onDisconnect/onConnect) handle clearing buffers when connection state changes
-  } else {
-    if (isConnected()) {
-      int len = bleuart.available();
-      if (len > 0) {
-        // Match dev branch: read all available bytes
-        // Safety: limit to MAX_FRAME_SIZE to prevent buffer overflow (dest buffer is MAX_FRAME_SIZE + 1)
-        int read_len = len > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : len;
-        int got = bleuart.readBytes(dest, read_len);
-        // Discard any excess bytes to prevent buffer buildup
-        if (len > MAX_FRAME_SIZE) {
-          uint8_t discard[MAX_FRAME_SIZE];
-          while (bleuart.available() > 0) {
-            int to_discard = bleuart.available() > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : bleuart.available();
-            bleuart.readBytes(discard, to_discard);
-          }
-          BLE_DEBUG_PRINTLN("readBytes: sz=%d (truncated from %d), hdr=%d", got, len, (uint32_t) dest[0]);
-        } else {
-          BLE_DEBUG_PRINTLN("readBytes: sz=%d, hdr=%d", got, (uint32_t) dest[0]);
-        }
-        return got;
-      }
+    } else {
+      // Write failed - keep frame in queue and try again next time
+      // This prevents frame loss and ensures reliable delivery
+      BLE_DEBUG_PRINTLN("writeBytes failed, keeping frame in queue");
     }
   }
+  
+  // Then, check receive queue (not blocked by send queue anymore)
+  if (isConnected()) {
+    int avail = bleuart.available();
+    if (avail > 0) {
+      // Safety: limit to MAX_FRAME_SIZE to prevent buffer overflow (dest buffer is MAX_FRAME_SIZE + 1)
+      int read_len = avail > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : avail;
+      int got = bleuart.readBytes(dest, read_len);
+      
+      // Discard any excess bytes to prevent buffer buildup if frame is larger than MAX_FRAME_SIZE
+      if (avail > MAX_FRAME_SIZE) {
+        uint8_t discard[MAX_FRAME_SIZE];
+        while (bleuart.available() > 0) {
+          int to_discard = bleuart.available() > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : bleuart.available();
+          bleuart.readBytes(discard, to_discard);
+        }
+        BLE_DEBUG_PRINTLN("readBytes: sz=%d (truncated from %d), hdr=%d", got, avail, (uint32_t) dest[0]);
+      } else {
+        BLE_DEBUG_PRINTLN("readBytes: sz=%d, hdr=%d", got, (uint32_t) dest[0]);
+      }
+      return got;
+    }
+  }
+  
   return 0;
 }
 
