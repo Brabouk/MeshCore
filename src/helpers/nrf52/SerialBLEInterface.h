@@ -7,21 +7,17 @@
 #define BLE_TX_POWER 4
 #endif
 
-// BLE serial interface implementation for nRF52 using Bluefruit library
-// Provides frame-based communication over BLE UART service with connection management
 class SerialBLEInterface : public BaseSerialInterface {
   BLEUart bleuart;
   bool _isEnabled;
-  // _isDeviceConnected is only true after security is established (onSecured callback)
-  // It remains false during initial connection and pairing phases
-  bool _isDeviceConnected;
+  bool _isDeviceConnected;  // Only true after security established (onSecured)
 
   struct Frame {
     uint8_t len;
     uint8_t buf[MAX_FRAME_SIZE];
   };
 
-  #define FRAME_QUEUE_SIZE  8  // Application-level frame buffer before sending to BLE
+  #define FRAME_QUEUE_SIZE  8
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
 
@@ -42,27 +38,14 @@ public:
     send_queue_len = 0;
   }
 
-  // Initialize BLE stack, configure security, and set up advertising
   void begin(const char* device_name, uint32_t pin_code);
-  // Disconnect all active BLE connections
   void disconnect();
-
-  // Enable interface and start advertising
   void enable() override;
-  // Disable interface, disconnect, and stop advertising
   void disable() override;
   bool isEnabled() const override { return _isEnabled; }
-
-  // Check if device is connected and connection handle is valid
   bool isConnected() const override;
-
-  // Check if write queue is at capacity
-  // Returns true when queue is full, providing backpressure to callers
   bool isWriteBusy() const override;
-
-  // Queue frame for transmission over BLE
   size_t writeFrame(const uint8_t src[], size_t len) override;
-  // Process received frames and handle outgoing frame queue
   size_t checkRecvFrame(uint8_t dest[]) override;
 };
 

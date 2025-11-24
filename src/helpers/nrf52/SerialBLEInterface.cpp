@@ -12,8 +12,6 @@ void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   }
 }
 
-// Callback invoked when BLE connection is terminated
-// Clears connection state
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%d", connection_handle, reason);
   if (instance) {
@@ -22,20 +20,16 @@ void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason
   }
 }
 
-// Callback invoked when BLE connection security is established
-// Marks device as fully connected and requests optimal connection parameters
 void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: onSecured handle=0x%04X", connection_handle);
   if (instance) {
     instance->_isDeviceConnected = true;
     
-    // Request connection parameter update with Apple-compliant values
-    // Min: 15ms (12 × 1.25ms), Max: 30ms (24 × 1.25ms), Latency: 0, Timeout: 2s (200 × 10ms)
     ble_gap_conn_params_t conn_params;
-    conn_params.min_conn_interval = 12;   // 15ms
+    conn_params.min_conn_interval = 12;   // 15ms (iOS-compliant)
     conn_params.max_conn_interval = 24;   // 30ms
     conn_params.slave_latency = 0;
-    conn_params.conn_sup_timeout = 200;   // 2 seconds (Apple minimum recommendation)
+    conn_params.conn_sup_timeout = 200;   // 2s (Apple minimum)
     
     uint32_t err_code = sd_ble_gap_conn_param_update(connection_handle, &conn_params);
     if (err_code == NRF_SUCCESS) {
@@ -46,8 +40,6 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   }
 }
 
-// Callback for BLE pairing passkey display/verification
-// Returns true to accept pairing request
 bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request) {
   (void)connection_handle;
   (void)passkey;
@@ -55,8 +47,6 @@ bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t co
   return true;
 }
 
-// Callback invoked when BLE pairing process completes
-// Disconnects if pairing failed, otherwise connection proceeds to secured state
 void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t auth_status) {
   (void)connection_handle;
   BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing complete status=%d", auth_status);
@@ -70,12 +60,10 @@ void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t a
   }
 }
 
-// BLE event handler - handles iOS connection parameter update requests
 void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   if (!instance) return;
   
   if (evt->header.evt_id == BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST) {
-    // iOS 13+ sends this during reconnection - we MUST respond or SoftDevice will assert/crash
     uint16_t conn_handle = evt->evt.gap_evt.conn_handle;
     BLE_DEBUG_PRINTLN("CONN_PARAM_UPDATE_REQUEST: handle=0x%04X, min_interval=%d, max_interval=%d, latency=%d, timeout=%d",
                      conn_handle,
@@ -84,8 +72,7 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
                      evt->evt.gap_evt.params.conn_param_update_request.conn_params.slave_latency,
                      evt->evt.gap_evt.params.conn_param_update_request.conn_params.conn_sup_timeout);
     
-    // Accept iOS's requested parameters by calling with NULL (uses PPCP from GAP service)
-    uint32_t err_code = sd_ble_gap_conn_param_update(conn_handle, NULL);
+    uint32_t err_code = sd_ble_gap_conn_param_update(conn_handle, NULL);  // NULL = use PPCP (iOS requirement)
     if (err_code == NRF_SUCCESS) {
       BLE_DEBUG_PRINTLN("Accepted CONN_PARAM_UPDATE_REQUEST (using PPCP)");
     } else {
@@ -94,10 +81,7 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   }
 }
 
-// Initialize BLE stack with device name and PIN code
-// Configures security, advertising, and registers all callbacks
 void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
-
   instance = this;
 
   char charpin[20];
@@ -109,14 +93,11 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
   Bluefruit.begin();
   
-  // Set Peripheral Preferred Connection Parameters (PPCP) for iOS compatibility
-  // iOS reads these during connection and may use them
-  // Min: 15ms (12 × 1.25ms), Max: 30ms (24 × 1.25ms), Latency: 0, Timeout: 2s (200 × 10ms)
   ble_gap_conn_params_t ppcp_params;
-  ppcp_params.min_conn_interval = 12;   // 15ms
+  ppcp_params.min_conn_interval = 12;   // 15ms (iOS-compliant)
   ppcp_params.max_conn_interval = 24;   // 30ms
   ppcp_params.slave_latency = 0;
-  ppcp_params.conn_sup_timeout = 200;   // 2 seconds (Apple minimum recommendation)
+  ppcp_params.conn_sup_timeout = 200;   // 2s (Apple minimum)
   
   uint32_t err_code = sd_ble_gap_ppcp_set(&ppcp_params);
   if (err_code == NRF_SUCCESS) {
@@ -171,27 +152,21 @@ void SerialBLEInterface::enable() {
   Bluefruit.Advertising.start(0);
 }
 
-// Disconnect active BLE connection (asynchronous - onDisconnect callback handles cleanup)
 void SerialBLEInterface::disconnect() {
   if (Bluefruit.connected() > 0) {
     Bluefruit.disconnect(0);
   }
 }
 
-// Disable interface, disconnect connections, and stop advertising
 void SerialBLEInterface::disable() {
   _isEnabled = false;
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disable");
-
-  // Clear send queue immediately to prevent writes after disable
   clearBuffers();
 
   disconnect();
   Bluefruit.Advertising.stop();
 }
 
-// Queue frame for transmission over BLE
-// Returns frame length if queued successfully, 0 if queue is full or not connected
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   if (len > MAX_FRAME_SIZE) {
     BLE_DEBUG_PRINTLN("writeFrame(), frame too big, len=%d", len);
@@ -213,38 +188,26 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   return 0;
 }
 
-// Process received frames, handle outgoing queue, and manage connection state
-// Returns length of received frame, or 0 if no frame available
-// Always drains send queue first (1 frame per call), then checks receive
-// This ensures receive is never blocked, allowing phone requests to be processed even during rapid sending
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
-  // First, drain send queue (1 frame per call to avoid overwhelming BLE stack)
   if (send_queue_len > 0 && isConnected()) {
     size_t written = bleuart.write(send_queue[0].buf, send_queue[0].len);
     if (written > 0) {
       BLE_DEBUG_PRINTLN("writeBytes: sz=%d, hdr=%d", (uint32_t)send_queue[0].len, (uint32_t)send_queue[0].buf[0]);
-
       send_queue_len--;
-      // Shift remaining frames down using memmove (handles overlapping memory correctly)
       if (send_queue_len > 0) {
-        memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));
+        memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));  // Handles overlapping memory
       }
     } else {
-      // Write failed - keep frame in queue and try again next time
-      // This prevents frame loss and ensures reliable delivery
       BLE_DEBUG_PRINTLN("writeBytes failed, keeping frame in queue");
     }
   }
   
-  // Then, check receive queue (not blocked by send queue anymore)
   if (isConnected()) {
     int avail = bleuart.available();
     if (avail > 0) {
-      // Safety: limit to MAX_FRAME_SIZE to prevent buffer overflow (dest buffer is MAX_FRAME_SIZE + 1)
-      int read_len = avail > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : avail;
+      int read_len = avail > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : avail;  // Prevent buffer overflow
       int got = bleuart.readBytes(dest, read_len);
       
-      // Discard any excess bytes to prevent buffer buildup if frame is larger than MAX_FRAME_SIZE
       if (avail > MAX_FRAME_SIZE) {
         uint8_t discard[MAX_FRAME_SIZE];
         while (bleuart.available() > 0) {
@@ -262,13 +225,10 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   return 0;
 }
 
-// Check if device is connected by verifying connection state
 bool SerialBLEInterface::isConnected() const {
   return _isDeviceConnected && Bluefruit.connected() > 0;
 }
 
-// Check if write queue is at capacity
-// Returns true when queue is full, providing backpressure to callers
 bool SerialBLEInterface::isWriteBusy() const {
   return send_queue_len >= FRAME_QUEUE_SIZE;
 }
