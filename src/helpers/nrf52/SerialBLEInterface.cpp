@@ -1,13 +1,17 @@
 #include "SerialBLEInterface.h"
 #include <string.h>
 #include "ble_gap.h"
+#include "nrf_nvic.h"
 
 static SerialBLEInterface* instance;
 
 void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: connected handle=0x%04X", connection_handle);
   if (instance) {
+    uint8_t nrf_nvic_state;
+    sd_nvic_critical_region_enter(&nrf_nvic_state);
     instance->_isDeviceConnected = false;
+    sd_nvic_critical_region_exit(nrf_nvic_state);
     instance->clearBuffers();
   }
 }
@@ -15,7 +19,10 @@ void SerialBLEInterface::onConnect(uint16_t connection_handle) {
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%d", connection_handle, reason);
   if (instance) {
+    uint8_t nrf_nvic_state;
+    sd_nvic_critical_region_enter(&nrf_nvic_state);
     instance->_isDeviceConnected = false;
+    sd_nvic_critical_region_exit(nrf_nvic_state);
     instance->clearBuffers();
   }
 }
@@ -23,7 +30,10 @@ void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason
 void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: onSecured handle=0x%04X", connection_handle);
   if (instance) {
+    uint8_t nrf_nvic_state;
+    sd_nvic_critical_region_enter(&nrf_nvic_state);
     instance->_isDeviceConnected = true;
+    sd_nvic_critical_region_exit(nrf_nvic_state);
     
     ble_gap_conn_params_t conn_params;
     conn_params.min_conn_interval = 12;   // 15ms (iOS-compliant)
@@ -123,6 +133,7 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
 
   bleuart.setPermission(SECMODE_ENC_WITH_MITM, SECMODE_ENC_WITH_MITM);
   bleuart.begin();
+  bleuart.setRxCallback(onBleUartRX);
 
   Bluefruit.Advertising.stop();
   Bluefruit.Advertising.clearData();
@@ -140,6 +151,14 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
 
   Bluefruit.Advertising.restartOnDisconnect(true);
 
+}
+
+void SerialBLEInterface::clearBuffers() {
+  uint8_t nrf_nvic_state;
+  sd_nvic_critical_region_enter(&nrf_nvic_state);
+  send_queue_len = 0;
+  recv_queue_len = 0;
+  sd_nvic_critical_region_exit(nrf_nvic_state);
 }
 
 // Enable interface and start advertising
@@ -173,8 +192,13 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
     return 0;
   }
 
-  if (isConnected() && len > 0) {
+  bool connected = isConnected();  // Cache result to avoid multiple calls
+  if (connected && len > 0) {
+    uint8_t nrf_nvic_state;
+    sd_nvic_critical_region_enter(&nrf_nvic_state);
+    
     if (send_queue_len >= FRAME_QUEUE_SIZE) {
+      sd_nvic_critical_region_exit(nrf_nvic_state);
       BLE_DEBUG_PRINTLN("writeFrame(), send_queue is full!");
       return 0;
     }
@@ -182,53 +206,119 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
     send_queue[send_queue_len].len = len;
     memcpy(send_queue[send_queue_len].buf, src, len);
     send_queue_len++;
-
+    
+    sd_nvic_critical_region_exit(nrf_nvic_state);
     return len;
   }
   return 0;
 }
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
-  if (send_queue_len > 0 && isConnected()) {
-    size_t written = bleuart.write(send_queue[0].buf, send_queue[0].len);
+  uint8_t nrf_nvic_state;
+  sd_nvic_critical_region_enter(&nrf_nvic_state);
+  bool has_queue = send_queue_len > 0;
+  sd_nvic_critical_region_exit(nrf_nvic_state);
+  
+  bool connected = isConnected();  // Cache result to avoid multiple calls
+  if (has_queue && connected) {
+    // Read frame data before critical section (BLE write is safe)
+    Frame frame_to_send;
+    sd_nvic_critical_region_enter(&nrf_nvic_state);
+    frame_to_send = send_queue[0];
+    sd_nvic_critical_region_exit(nrf_nvic_state);
+    
+    size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
     if (written > 0) {
-      BLE_DEBUG_PRINTLN("writeBytes: sz=%d, hdr=%d", (uint32_t)send_queue[0].len, (uint32_t)send_queue[0].buf[0]);
-      send_queue_len--;
-      if (send_queue_len > 0) {
-        memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));  // Handles overlapping memory
+      if (written == frame_to_send.len) {
+        // Complete write - remove frame from queue
+        BLE_DEBUG_PRINTLN("writeBytes: sz=%d, hdr=%d", (uint32_t)frame_to_send.len, (uint32_t)frame_to_send.buf[0]);
+        
+        sd_nvic_critical_region_enter(&nrf_nvic_state);
+        send_queue_len--;
+        if (send_queue_len > 0) {
+          memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));  // Handles overlapping memory
+        }
+        sd_nvic_critical_region_exit(nrf_nvic_state);
+      } else {
+        // Partial write - update frame to contain remaining bytes
+        BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%d of %d, hdr=%d", (uint32_t)written, (uint32_t)frame_to_send.len, (uint32_t)frame_to_send.buf[0]);
+        
+        sd_nvic_critical_region_enter(&nrf_nvic_state);
+        size_t remaining = frame_to_send.len - written;
+        // Shift remaining bytes to start of buffer
+        memmove(send_queue[0].buf, send_queue[0].buf + written, remaining);
+        send_queue[0].len = remaining;
+        sd_nvic_critical_region_exit(nrf_nvic_state);
+        // Frame stays in queue for retry on next call
       }
     } else {
       BLE_DEBUG_PRINTLN("writeBytes failed, keeping frame in queue");
     }
   }
   
-  if (isConnected()) {
-    int avail = bleuart.available();
-    if (avail > 0) {
-      int read_len = avail > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : avail;  // Prevent buffer overflow
-      int got = bleuart.readBytes(dest, read_len);
-      
-      if (avail > MAX_FRAME_SIZE) {
-        uint8_t discard[MAX_FRAME_SIZE];
-        while (bleuart.available() > 0) {
-          int to_discard = bleuart.available() > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : bleuart.available();
-          bleuart.readBytes(discard, to_discard);
-        }
-        BLE_DEBUG_PRINTLN("readBytes: sz=%d (truncated from %d), hdr=%d", got, avail, (uint32_t) dest[0]);
-      } else {
-        BLE_DEBUG_PRINTLN("readBytes: sz=%d, hdr=%d", got, (uint32_t) dest[0]);
-      }
-      return got;
+  // Check receive queue
+  sd_nvic_critical_region_enter(&nrf_nvic_state);
+  if (recv_queue_len > 0) {
+    size_t len = recv_queue[0].len;
+    memcpy(dest, recv_queue[0].buf, len);
+    
+    recv_queue_len--;
+    if (recv_queue_len > 0) {
+      memmove(&recv_queue[0], &recv_queue[1], recv_queue_len * sizeof(Frame));
     }
+    sd_nvic_critical_region_exit(nrf_nvic_state);
+    
+    BLE_DEBUG_PRINTLN("readBytes: sz=%d, hdr=%d", len, (uint32_t) dest[0]);
+    return len;
   }
+  sd_nvic_critical_region_exit(nrf_nvic_state);
   
   return 0;
 }
 
+void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
+  (void)conn_handle;
+  if (!instance) {
+    return;
+  }
+  
+  uint8_t nrf_nvic_state;
+  sd_nvic_critical_region_enter(&nrf_nvic_state);
+  
+  // Read all available data into queue
+  while (instance->bleuart.available() > 0) {
+    if (instance->recv_queue_len >= FRAME_QUEUE_SIZE) {
+      // Queue full - drain remaining data to prevent overflow
+      while (instance->bleuart.available() > 0) {
+        instance->bleuart.read();
+      }
+      BLE_DEBUG_PRINTLN("onBleUartRX: recv queue full, dropping data");
+      break;
+    }
+    
+    int avail = instance->bleuart.available();
+    int read_len = avail > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : avail;
+    
+    instance->recv_queue[instance->recv_queue_len].len = read_len;
+    instance->bleuart.readBytes(instance->recv_queue[instance->recv_queue_len].buf, read_len);
+    instance->recv_queue_len++;
+  }
+  
+  sd_nvic_critical_region_exit(nrf_nvic_state);
+}
+
 bool SerialBLEInterface::isConnected() const {
-  return _isDeviceConnected && Bluefruit.connected() > 0;
+  uint8_t nrf_nvic_state;
+  sd_nvic_critical_region_enter(&nrf_nvic_state);
+  bool device_connected = _isDeviceConnected;
+  sd_nvic_critical_region_exit(nrf_nvic_state);
+  return device_connected && Bluefruit.connected() > 0;
 }
 
 bool SerialBLEInterface::isWriteBusy() const {
-  return send_queue_len >= FRAME_QUEUE_SIZE;
+  uint8_t nrf_nvic_state;
+  sd_nvic_critical_region_enter(&nrf_nvic_state);
+  bool busy = send_queue_len >= FRAME_QUEUE_SIZE;
+  sd_nvic_critical_region_exit(nrf_nvic_state);
+  return busy;
 }
