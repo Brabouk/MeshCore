@@ -20,22 +20,24 @@ class SerialBLEInterface : public BaseSerialInterface {
   #define FRAME_QUEUE_SIZE  8
   int send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
+  int recv_queue_len;
+  Frame recv_queue[FRAME_QUEUE_SIZE];
 
-  void clearBuffers() {
-    send_queue_len = 0;
-  }
+  void clearBuffers();
   static void onConnect(uint16_t connection_handle);
   static void onDisconnect(uint16_t connection_handle, uint8_t reason);
   static void onSecured(uint16_t connection_handle);
   static bool onPairingPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request);
   static void onPairingComplete(uint16_t connection_handle, uint8_t auth_status);
   static void onBLEEvent(ble_evt_t* evt);
+  static void onBleUartRX(uint16_t conn_handle);
 
 public:
   SerialBLEInterface() {
     _isEnabled = false;
     _isDeviceConnected = false;
     send_queue_len = 0;
+    recv_queue_len = 0;
   }
 
   void begin(const char* device_name, uint32_t pin_code);
