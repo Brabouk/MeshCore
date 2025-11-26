@@ -233,6 +233,6 @@ void loop() {
 #ifdef NRF52_PLATFORM
   sd_app_evt_wait();
 #elif defined(ESP32)
-  delay(1);
+  yield();
 #endif
 }
