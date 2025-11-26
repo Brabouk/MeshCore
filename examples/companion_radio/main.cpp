@@ -231,8 +231,54 @@ void loop() {
   rtc_clock.tick();
 
 #ifdef NRF52_PLATFORM
+  #ifdef SLEEP_DEBUG
+    static uint32_t total_sleep_time = 0;
+    static uint32_t sleep_count = 0;
+    static uint32_t last_report_time = 0;
+    uint32_t before_sleep = millis();
+  #endif
   sd_app_evt_wait();
+  #ifdef SLEEP_DEBUG
+    uint32_t after_sleep = millis();
+    uint32_t sleep_duration = after_sleep - before_sleep;
+    if (sleep_duration > 0) {
+      total_sleep_time += sleep_duration;
+      sleep_count++;
+    }
+    if (millis() - last_report_time >= 10000) { // Report every 10 seconds
+      uint32_t awake_time = 10000 - total_sleep_time;
+      MESH_DEBUG_PRINTLN("Sleep stats (10s): slept=%ums awake=%ums count=%u (%.1f%% sleep)", 
+                         (unsigned int)total_sleep_time, (unsigned int)awake_time, (unsigned int)sleep_count, 
+                         (total_sleep_time * 100.0f) / 10000.0f);
+      total_sleep_time = 0;
+      sleep_count = 0;
+      last_report_time = millis();
+    }
+  #endif
 #elif defined(ESP32)
+  #ifdef SLEEP_DEBUG
+    static uint32_t total_sleep_time = 0;
+    static uint32_t sleep_count = 0;
+    static uint32_t last_report_time = 0;
+    uint32_t before_sleep = millis();
+  #endif
   yield();
+  #ifdef SLEEP_DEBUG
+    uint32_t after_sleep = millis();
+    uint32_t sleep_duration = after_sleep - before_sleep;
+    if (sleep_duration > 0) {
+      total_sleep_time += sleep_duration;
+      sleep_count++;
+    }
+    if (millis() - last_report_time >= 10000) { // Report every 10 seconds
+      uint32_t awake_time = 10000 - total_sleep_time;
+      MESH_DEBUG_PRINTLN("Sleep stats (10s): slept=%ums awake=%ums count=%u (%.1f%% sleep)", 
+                         (unsigned int)total_sleep_time, (unsigned int)awake_time, (unsigned int)sleep_count, 
+                         (total_sleep_time * 100.0f) / 10000.0f);
+      total_sleep_time = 0;
+      sleep_count = 0;
+      last_report_time = millis();
+    }
+  #endif
 #endif
 }
