@@ -2,7 +2,10 @@
 LittleFS Patch Script
 
 This script updates the Adafruit nRF52 Arduino framework's LittleFS library
-from version 1.6 (used in Adafruit 1.7.0) to version 1.7.2.
+from version 1.6 (used in Adafruit 1.7.0) to version 1.7.0.
+
+The patch uses the official LittleFS v1.7.0 source from:
+https://github.com/littlefs-project/littlefs/releases/tag/v1.7.0
 
 """
 
