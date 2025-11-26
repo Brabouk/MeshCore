@@ -1,11 +1,7 @@
 """
-Bluefruit BLE Advertising Patch Script
+Bluefruit BLE Characteristic Patch Script
 
-This script removes the unnecessary "stop first if current running" block from
-BLEAdvertising.cpp in the Adafruit nRF52 Arduino framework.
-SoftDevice v6 API's sd_ble_gap_adv_set_configure() is designed to update advertising data/parameters while advertising is active, so no need for unneccessary stops.
-
-Also patches BLECharacteristic.cpp to fix a semaphore leak bug:
+Patches BLECharacteristic.cpp to fix a semaphore leak bug:
 - BLECharacteristic::notify() acquires a semaphore with conn->getHvnPacket()
 - The semaphore is only released on error (when sd_ble_gatts_hvx fails)
 - This causes semaphore leaks when BLE is disabled/disconnecting, leading to crashes
@@ -16,43 +12,6 @@ Also patches BLECharacteristic.cpp to fix a semaphore leak bug:
 from pathlib import Path
 
 Import("env")  # pylint: disable=undefined-variable
-
-
-def _patch_ble_advertising(source: Path) -> bool:
-    """
-    Patch BLEAdvertising.cpp to remove unnecessary stop block.
-    Returns True if patch was applied or already applied, False on error.
-    """
-    try:
-        text = source.read_text()
-        
-        # Check if patch is already applied (stop block doesn't exist)
-        stop_block = (
-            "  // stop first if current running since we may change advertising data/params\n"
-            "  if (_running) {\n"
-            "    sd_ble_gap_adv_stop(_hdl);\n"
-            "  }\n\n"
-        )
-        
-        if stop_block not in text:
-            # Verify patch is applied: check that sd_ble_gap_adv_stop is not called in this context
-            if "sd_ble_gap_adv_stop" not in text or "if (_running)" not in text:
-                return True  # Already patched
-            return False  # Unexpected state
-        
-        # Apply patch
-        text = text.replace(stop_block, "", 1)
-        source.write_text(text)
-        
-        # Verify patch was applied correctly
-        verify_text = source.read_text()
-        if stop_block in verify_text:
-            return False  # Patch failed to apply
-        
-        return True
-    except Exception as e:
-        print(f"Bluefruit patch: ERROR patching BLEAdvertising.cpp: {e}")
-        return False
 
 
 def _patch_ble_characteristic(source: Path) -> bool:
@@ -130,25 +89,6 @@ def _apply_bluefruit_patch(target, source, env):  # pylint: disable=unused-argum
 
     framework_dir = Path(framework_path)
     patch_failed = False
-    
-    # Patch BLEAdvertising.cpp
-    target_file = framework_dir / "libraries" / "Bluefruit52Lib" / "src" / "BLEAdvertising.cpp"
-    if target_file.exists():
-        before = target_file.read_text()
-        success = _patch_ble_advertising(target_file)
-        after = target_file.read_text()
-        
-        if success:
-            if before != after:
-                print("Bluefruit patch: OK - Applied BLEAdvertising.cpp updates")
-            else:
-                print("Bluefruit patch: OK - BLEAdvertising.cpp already up to date")
-        else:
-            print("Bluefruit patch: FAILED - Failed to patch BLEAdvertising.cpp")
-            patch_failed = True
-    else:
-        print("Bluefruit patch: ERROR - BLEAdvertising.cpp not found")
-        patch_failed = True
     
     # Patch BLECharacteristic.cpp
     target_file = framework_dir / "libraries" / "Bluefruit52Lib" / "src" / "BLECharacteristic.cpp"
