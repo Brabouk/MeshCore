@@ -126,10 +126,6 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
   bleuart.begin();
   bleuart.setRxCallback(onBleUartRX);
 
-  Bluefruit.Advertising.stop();
-  Bluefruit.Advertising.clearData();
-  Bluefruit.ScanResponse.clearData();
-
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
 
