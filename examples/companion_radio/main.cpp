@@ -71,6 +71,7 @@ static uint32_t _atoi(const char* sp) {
     ArduinoSerialInterface serial_interface;
   #endif
 #elif defined(NRF52_PLATFORM)
+  #include <nrf_soc.h>
   #ifdef BLE_PIN_CODE
     #include <helpers/nrf52/SerialBLEInterface.h>
     SerialBLEInterface serial_interface;
@@ -228,4 +229,10 @@ void loop() {
   ui_task.loop();
 #endif
   rtc_clock.tick();
+
+#ifdef NRF52_PLATFORM
+  sd_app_evt_wait();
+#elif defined(ESP32)
+  delay(1);
+#endif
 }
