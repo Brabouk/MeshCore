@@ -8,21 +8,15 @@ static SerialBLEInterface* instance;
 void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: connected handle=0x%04X", connection_handle);
   if (instance) {
-    uint8_t nrf_nvic_state;
-    sd_nvic_critical_region_enter(&nrf_nvic_state);
     instance->_isDeviceConnected = false;
-    sd_nvic_critical_region_exit(nrf_nvic_state);
-    instance->clearBuffers();
+    // Buffers already cleared by enable() or previous onDisconnect()
   }
 }
 
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%d", connection_handle, reason);
   if (instance) {
-    uint8_t nrf_nvic_state;
-    sd_nvic_critical_region_enter(&nrf_nvic_state);
     instance->_isDeviceConnected = false;
-    sd_nvic_critical_region_exit(nrf_nvic_state);
     instance->clearBuffers();
   }
 }
@@ -30,10 +24,7 @@ void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason
 void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: onSecured handle=0x%04X", connection_handle);
   if (instance) {
-    uint8_t nrf_nvic_state;
-    sd_nvic_critical_region_enter(&nrf_nvic_state);
     instance->_isDeviceConnected = true;
-    sd_nvic_critical_region_exit(nrf_nvic_state);
     
     ble_gap_conn_params_t conn_params;
     conn_params.min_conn_interval = 12;   // 15ms (iOS-compliant)
@@ -180,9 +171,8 @@ void SerialBLEInterface::disconnect() {
 void SerialBLEInterface::disable() {
   _isEnabled = false;
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disable");
-  clearBuffers();
 
-  disconnect();
+  disconnect();  // Will trigger onDisconnect() which clears buffers
   Bluefruit.Advertising.stop();
 }
 
@@ -215,17 +205,18 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   uint8_t nrf_nvic_state;
-  sd_nvic_critical_region_enter(&nrf_nvic_state);
-  bool has_queue = send_queue_len > 0;
-  sd_nvic_critical_region_exit(nrf_nvic_state);
-  
   bool connected = isConnected();  // Cache result to avoid multiple calls
-  if (has_queue && connected) {
-    // Read frame data before critical section (BLE write is safe)
-    Frame frame_to_send;
+  if (connected) {
+    // Check send queue and process if available
     sd_nvic_critical_region_enter(&nrf_nvic_state);
-    frame_to_send = send_queue[0];
+    bool has_queue = send_queue_len > 0;
+    Frame frame_to_send;
+    if (has_queue) {
+      frame_to_send = send_queue[0];
+    }
     sd_nvic_critical_region_exit(nrf_nvic_state);
+    
+    if (has_queue) {
     
     size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
     if (written > 0) {
@@ -253,6 +244,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
       }
     } else {
       BLE_DEBUG_PRINTLN("writeBytes failed, keeping frame in queue");
+    }
     }
   }
   
@@ -308,11 +300,7 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
 }
 
 bool SerialBLEInterface::isConnected() const {
-  uint8_t nrf_nvic_state;
-  sd_nvic_critical_region_enter(&nrf_nvic_state);
-  bool device_connected = _isDeviceConnected;
-  sd_nvic_critical_region_exit(nrf_nvic_state);
-  return device_connected && Bluefruit.connected() > 0;
+  return _isDeviceConnected && Bluefruit.connected() > 0;
 }
 
 bool SerialBLEInterface::isWriteBusy() const {
