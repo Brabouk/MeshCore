@@ -1,5 +1,8 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
+#ifdef NRF52_PLATFORM
+  #include <nrf_soc.h>
+#endif
 #include "MyMesh.h"
 
 // Believe it or not, this std C function is busted on some platforms!
@@ -228,4 +231,7 @@ void loop() {
   ui_task.loop();
 #endif
   rtc_clock.tick();
+#ifdef NRF52_PLATFORM
+  sd_app_evt_wait();
+#endif
 }
