@@ -3,6 +3,7 @@
 
 #if defined(NRF52_PLATFORM)
   #include <InternalFileSystem.h>
+  #include <nrf_soc.h>
 #elif defined(RP2040_PLATFORM)
   #include <LittleFS.h>
 #elif defined(ESP32)
@@ -588,4 +589,8 @@ void setup() {
 void loop() {
   the_mesh.loop();
   rtc_clock.tick();
+
+#ifdef NRF52_PLATFORM
+  sd_app_evt_wait();
+#endif
 }
