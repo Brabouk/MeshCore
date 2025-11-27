@@ -14,13 +14,15 @@ class SerialBLEInterface : public BaseSerialInterface {
 
   struct Frame {
     uint8_t len;
+    uint8_t retry_count;
     uint8_t buf[MAX_FRAME_SIZE];
   };
 
   #define FRAME_QUEUE_SIZE  8
-  int send_queue_len;
+  #define MAX_WRITE_RETRIES 3
+  uint8_t send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
-  int recv_queue_len;
+  uint8_t recv_queue_len;
   Frame recv_queue[FRAME_QUEUE_SIZE];
 
   void clearBuffers();
