@@ -1,5 +1,7 @@
 #include "SensorMesh.h"
-
+#ifdef NRF52_PLATFORM
+  #include <nrf_soc.h>
+#endif
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
   static UITask ui_task(display);
@@ -145,4 +147,7 @@ void loop() {
   ui_task.loop();
 #endif
   rtc_clock.tick();
+#ifdef NRF52_PLATFORM
+  sd_app_evt_wait();
+#endif
 }
