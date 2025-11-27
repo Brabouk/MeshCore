@@ -3,18 +3,19 @@
 #include "ble_gap.h"
 #include "nrf_nvic.h"
 
-static SerialBLEInterface* instance;
+static SerialBLEInterface* instance = nullptr;
 
 void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: connected handle=0x%04X", connection_handle);
   if (instance) {
+    // Connection established but not yet secure - wait for onSecured() before allowing data
     instance->_isDeviceConnected = false;
     // Buffers already cleared by enable() or previous onDisconnect()
   }
 }
 
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
-  BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%d", connection_handle, reason);
+  BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%u", connection_handle, (unsigned)reason);
   if (instance) {
     instance->_isDeviceConnected = false;
     instance->clearBuffers();
@@ -50,7 +51,7 @@ bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t co
 
 void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t auth_status) {
   (void)connection_handle;
-  BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing complete status=%d", auth_status);
+  BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing complete status=%u", (unsigned)auth_status);
   if (auth_status == BLE_GAP_SEC_STATUS_SUCCESS) {
     BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing successful");
   } else {
@@ -66,12 +67,12 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   
   if (evt->header.evt_id == BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST) {
     uint16_t conn_handle = evt->evt.gap_evt.conn_handle;
-    BLE_DEBUG_PRINTLN("CONN_PARAM_UPDATE_REQUEST: handle=0x%04X, min_interval=%d, max_interval=%d, latency=%d, timeout=%d",
+    BLE_DEBUG_PRINTLN("CONN_PARAM_UPDATE_REQUEST: handle=0x%04X, min_interval=%u, max_interval=%u, latency=%u, timeout=%u",
                      conn_handle,
-                     evt->evt.gap_evt.params.conn_param_update_request.conn_params.min_conn_interval,
-                     evt->evt.gap_evt.params.conn_param_update_request.conn_params.max_conn_interval,
-                     evt->evt.gap_evt.params.conn_param_update_request.conn_params.slave_latency,
-                     evt->evt.gap_evt.params.conn_param_update_request.conn_params.conn_sup_timeout);
+                     (unsigned)evt->evt.gap_evt.params.conn_param_update_request.conn_params.min_conn_interval,
+                     (unsigned)evt->evt.gap_evt.params.conn_param_update_request.conn_params.max_conn_interval,
+                     (unsigned)evt->evt.gap_evt.params.conn_param_update_request.conn_params.slave_latency,
+                     (unsigned)evt->evt.gap_evt.params.conn_param_update_request.conn_params.conn_sup_timeout);
     
     uint32_t err_code = sd_ble_gap_conn_param_update(conn_handle, NULL);  // NULL = use PPCP (iOS requirement)
     if (err_code == NRF_SUCCESS) {
@@ -83,10 +84,13 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
 }
 
 void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
+  if (instance != nullptr && instance != this) {
+    BLE_DEBUG_PRINTLN("WARNING: SerialBLEInterface instance already exists, overwriting");
+  }
   instance = this;
 
   char charpin[20];
-  sprintf(charpin, "%d", pin_code);
+  snprintf(charpin, sizeof(charpin), "%lu", (unsigned long)pin_code);
 
   // If we want to control BLE LED ourselves, uncomment this:
   // Bluefruit.autoConnLed(false);
@@ -174,7 +178,7 @@ void SerialBLEInterface::disable() {
 
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   if (len > MAX_FRAME_SIZE) {
-    BLE_DEBUG_PRINTLN("writeFrame(), frame too big, len=%d", len);
+    BLE_DEBUG_PRINTLN("writeFrame(), frame too big, len=%zu", len);
     return 0;
   }
 
@@ -190,6 +194,7 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
     }
 
     send_queue[send_queue_len].len = len;
+    send_queue[send_queue_len].retry_count = 0;
     memcpy(send_queue[send_queue_len].buf, src, len);
     send_queue_len++;
     
@@ -213,34 +218,47 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     sd_nvic_critical_region_exit(nrf_nvic_state);
     
     if (has_queue) {
-    
-    size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
-    if (written > 0) {
-      if (written == frame_to_send.len) {
-        // Complete write - remove frame from queue
-        BLE_DEBUG_PRINTLN("writeBytes: sz=%d, hdr=%d", (uint32_t)frame_to_send.len, (uint32_t)frame_to_send.buf[0]);
-        
+      size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
+      if (written > 0) {
+        if (written == frame_to_send.len) {
+          // Complete write - remove frame from queue
+          BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
+          
+          sd_nvic_critical_region_enter(&nrf_nvic_state);
+          send_queue_len--;
+          if (send_queue_len > 0) {
+            memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));  // Handles overlapping memory
+          }
+          sd_nvic_critical_region_exit(nrf_nvic_state);
+        } else {
+          // Partial write - update frame to contain remaining bytes
+          BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%zu of %u, hdr=%u", written, (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
+          
+          sd_nvic_critical_region_enter(&nrf_nvic_state);
+          size_t remaining = frame_to_send.len - written;
+          // Shift remaining bytes to start of buffer
+          memmove(send_queue[0].buf, send_queue[0].buf + written, remaining);
+          send_queue[0].len = remaining;
+          send_queue[0].retry_count = 0;  // Reset retry on partial success
+          sd_nvic_critical_region_exit(nrf_nvic_state);
+          // Frame stays in queue for retry on next call
+        }
+      } else {
+        // Write failed - increment retry counter
         sd_nvic_critical_region_enter(&nrf_nvic_state);
-        send_queue_len--;
-        if (send_queue_len > 0) {
-          memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));  // Handles overlapping memory
+        send_queue[0].retry_count++;
+        if (send_queue[0].retry_count >= MAX_WRITE_RETRIES) {
+          // Drop frame after max retries
+          BLE_DEBUG_PRINTLN("writeBytes failed after %u retries, dropping frame", (unsigned)MAX_WRITE_RETRIES);
+          send_queue_len--;
+          if (send_queue_len > 0) {
+            memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));
+          }
+        } else {
+          BLE_DEBUG_PRINTLN("writeBytes failed, retry %u/%u", (unsigned)send_queue[0].retry_count, (unsigned)MAX_WRITE_RETRIES);
         }
         sd_nvic_critical_region_exit(nrf_nvic_state);
-      } else {
-        // Partial write - update frame to contain remaining bytes
-        BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%d of %d, hdr=%d", (uint32_t)written, (uint32_t)frame_to_send.len, (uint32_t)frame_to_send.buf[0]);
-        
-        sd_nvic_critical_region_enter(&nrf_nvic_state);
-        size_t remaining = frame_to_send.len - written;
-        // Shift remaining bytes to start of buffer
-        memmove(send_queue[0].buf, send_queue[0].buf + written, remaining);
-        send_queue[0].len = remaining;
-        sd_nvic_critical_region_exit(nrf_nvic_state);
-        // Frame stays in queue for retry on next call
       }
-    } else {
-      BLE_DEBUG_PRINTLN("writeBytes failed, keeping frame in queue");
-    }
     }
   }
   
@@ -256,7 +274,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     }
     sd_nvic_critical_region_exit(nrf_nvic_state);
     
-    BLE_DEBUG_PRINTLN("readBytes: sz=%d, hdr=%d", len, (uint32_t) dest[0]);
+    BLE_DEBUG_PRINTLN("readBytes: sz=%zu, hdr=%u", len, (unsigned)dest[0]);
     return len;
   }
   sd_nvic_critical_region_exit(nrf_nvic_state);
