@@ -589,8 +589,9 @@ void setup() {
 void loop() {
   the_mesh.loop();
   rtc_clock.tick();
-
 #ifdef NRF52_PLATFORM
-  sd_app_evt_wait();
+  #ifndef DISABLE_SLEEP
+    sd_app_evt_wait();
+  #endif
 #endif
 }
