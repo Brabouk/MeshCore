@@ -1,6 +1,7 @@
 #include "SerialBLEInterface.h"
 #include <string.h>
 #include "ble_gap.h"
+#include "ble_hci.h"
 #include "nrf_nvic.h"
 
 static SerialBLEInterface* instance = nullptr;
@@ -89,6 +90,23 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
   }
   instance = this;
 
+  // Validate device_name parameter
+  if (device_name == nullptr) {
+    BLE_DEBUG_PRINTLN("ERROR: device_name is NULL");
+    return;
+  }
+  
+  // BLE device name max length is 31 bytes (BLE_GAP_DEVNAME_NAME_MAX_LEN)
+  size_t name_len = strlen(device_name);
+  if (name_len == 0) {
+    BLE_DEBUG_PRINTLN("ERROR: device_name is empty");
+    return;
+  }
+  if (name_len > 31) {
+    BLE_DEBUG_PRINTLN("ERROR: device_name too long (%zu bytes, max 31)", name_len);
+    return;
+  }
+
   char charpin[20];
   snprintf(charpin, sizeof(charpin), "%lu", (unsigned long)pin_code);
 
@@ -163,8 +181,10 @@ void SerialBLEInterface::enable() {
 }
 
 void SerialBLEInterface::disconnect() {
-  if (Bluefruit.connected() > 0) {
-    Bluefruit.disconnect(0);
+  // Disconnect all possible connection handles (S140 supports up to 20 connections)
+  // Invalid handles are ignored, so we can safely try all of them
+  for (uint16_t conn_handle = 0; conn_handle < 20; conn_handle++) {
+    sd_ble_gap_disconnect(conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
   }
 }
 
@@ -244,18 +264,28 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
           // Frame stays in queue for retry on next call
         }
       } else {
-        // Write failed - increment retry counter
+        // Write failed (written == 0) - check if connection is still valid
+        // Re-check connection state as it may have changed during write
+        bool still_connected = isConnected();
+        
         sd_nvic_critical_region_enter(&nrf_nvic_state);
-        send_queue[0].retry_count++;
-        if (send_queue[0].retry_count >= MAX_WRITE_RETRIES) {
-          // Drop frame after max retries
-          BLE_DEBUG_PRINTLN("writeBytes failed after %u retries, dropping frame", (unsigned)MAX_WRITE_RETRIES);
-          send_queue_len--;
-          if (send_queue_len > 0) {
-            memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));
-          }
+        if (still_connected) {
+          // Connection still valid - likely temporary buffer full, don't count as retry
+          // Frame stays in queue for next attempt without incrementing retry counter
+          BLE_DEBUG_PRINTLN("writeBytes failed (buffer full?), will retry");
         } else {
-          BLE_DEBUG_PRINTLN("writeBytes failed, retry %u/%u", (unsigned)send_queue[0].retry_count, (unsigned)MAX_WRITE_RETRIES);
+          // Connection lost - increment retry counter
+          send_queue[0].retry_count++;
+          if (send_queue[0].retry_count >= MAX_WRITE_RETRIES) {
+            // Drop frame after max retries
+            BLE_DEBUG_PRINTLN("writeBytes failed after %u retries, dropping frame", (unsigned)MAX_WRITE_RETRIES);
+            send_queue_len--;
+            if (send_queue_len > 0) {
+              memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));
+            }
+          } else {
+            BLE_DEBUG_PRINTLN("writeBytes failed, retry %u/%u", (unsigned)send_queue[0].retry_count, (unsigned)MAX_WRITE_RETRIES);
+          }
         }
         sd_nvic_critical_region_exit(nrf_nvic_state);
       }
