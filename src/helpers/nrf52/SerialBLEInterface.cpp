@@ -163,11 +163,13 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
 }
 
 void SerialBLEInterface::clearBuffers() {
-  uint8_t nrf_nvic_state;
-  sd_nvic_critical_region_enter(&nrf_nvic_state);
-  send_queue_len = 0;
-  recv_queue_len = 0;
-  sd_nvic_critical_region_exit(nrf_nvic_state);
+  // Lock-free: just reset pointers, ISR will see empty queue
+  send_queue_head = 0;
+  send_queue_tail = 0;
+  __sync_synchronize();  // Memory barrier
+  recv_queue_head = 0;
+  recv_queue_tail = 0;
+  __sync_synchronize();  // Memory barrier
 }
 
 // Enable interface and start advertising
@@ -202,112 +204,96 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
     return 0;
   }
 
-  bool connected = isConnected();  // Cache result to avoid multiple calls
+  bool connected = isConnected();
   if (connected && len > 0) {
-    uint8_t nrf_nvic_state;
-    sd_nvic_critical_region_enter(&nrf_nvic_state);
+    // Lock-free: check if queue has space
+    uint8_t head = send_queue_head;
+    uint8_t tail = send_queue_tail;
+    __sync_synchronize();  // Memory barrier - ensure we see latest tail
     
-    if (send_queue_len >= FRAME_QUEUE_SIZE) {
-      sd_nvic_critical_region_exit(nrf_nvic_state);
+    uint8_t next_head = (head + 1) % FRAME_QUEUE_SIZE;
+    if (next_head == tail) {
       BLE_DEBUG_PRINTLN("writeFrame(), send_queue is full!");
       return 0;
     }
 
-    send_queue[send_queue_len].len = len;
-    send_queue[send_queue_len].retry_count = 0;
-    memcpy(send_queue[send_queue_len].buf, src, len);
-    send_queue_len++;
+    // Write frame data
+    send_queue[head].len = len;
+    send_queue[head].retry_count = 0;
+    memcpy(send_queue[head].buf, src, len);
     
-    sd_nvic_critical_region_exit(nrf_nvic_state);
+    // Atomically update head pointer
+    __sync_synchronize();  // Memory barrier - ensure data is written before head update
+    send_queue_head = next_head;
+    
     return len;
   }
   return 0;
 }
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
-  uint8_t nrf_nvic_state;
-  bool connected = isConnected();  // Cache result to avoid multiple calls
+  bool connected = isConnected();
   if (connected) {
-    // Check send queue and process if available
-    sd_nvic_critical_region_enter(&nrf_nvic_state);
-    bool has_queue = send_queue_len > 0;
-    Frame frame_to_send;
-    if (has_queue) {
-      frame_to_send = send_queue[0];
-    }
-    sd_nvic_critical_region_exit(nrf_nvic_state);
+    // Process send queue - lock-free ring buffer
+    uint8_t tail = send_queue_tail;
+    uint8_t head = send_queue_head;
+    __sync_synchronize();  // Memory barrier
     
-    if (has_queue) {
+    if (tail != head) {
+      // Copy frame data (ISR-safe: we're the only reader)
+      Frame frame_to_send = send_queue[tail];
+      __sync_synchronize();  // Memory barrier - ensure we have consistent copy
+      
       size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
       if (written > 0) {
         if (written == frame_to_send.len) {
-          // Complete write - remove frame from queue
+          // Complete write - advance tail pointer
           BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
-          
-          sd_nvic_critical_region_enter(&nrf_nvic_state);
-          send_queue_len--;
-          if (send_queue_len > 0) {
-            memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));  // Handles overlapping memory
-          }
-          sd_nvic_critical_region_exit(nrf_nvic_state);
+          __sync_synchronize();  // Memory barrier
+          send_queue_tail = (tail + 1) % FRAME_QUEUE_SIZE;
         } else {
-          // Partial write - update frame to contain remaining bytes
-          BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%zu of %u, hdr=%u", written, (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
-          
-          sd_nvic_critical_region_enter(&nrf_nvic_state);
-          size_t remaining = frame_to_send.len - written;
-          // Shift remaining bytes to start of buffer
-          memmove(send_queue[0].buf, send_queue[0].buf + written, remaining);
-          send_queue[0].len = remaining;
-          send_queue[0].retry_count = 0;  // Reset retry on partial success
-          sd_nvic_critical_region_exit(nrf_nvic_state);
-          // Frame stays in queue for retry on next call
+          // Partial write - retry whole frame next time (lock-free: can't modify in place)
+          BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%zu of %u, will retry whole frame", written, (unsigned)frame_to_send.len);
+          // Frame stays in queue, will be retried on next call
+          __sync_synchronize();  // Memory barrier
         }
       } else {
-        // Write failed (written == 0) - check if connection is still valid
-        // Re-check connection state as it may have changed during write
+        // Write failed - check connection and handle retries
         bool still_connected = isConnected();
-        
-        sd_nvic_critical_region_enter(&nrf_nvic_state);
         if (still_connected) {
-          // Connection still valid - likely temporary buffer full, don't count as retry
-          // Frame stays in queue for next attempt without incrementing retry counter
           BLE_DEBUG_PRINTLN("writeBytes failed (buffer full?), will retry");
         } else {
-          // Connection lost - increment retry counter
-          send_queue[0].retry_count++;
-          if (send_queue[0].retry_count >= MAX_WRITE_RETRIES) {
-            // Drop frame after max retries
+          send_queue[tail].retry_count++;
+          if (send_queue[tail].retry_count >= MAX_WRITE_RETRIES) {
             BLE_DEBUG_PRINTLN("writeBytes failed after %u retries, dropping frame", (unsigned)MAX_WRITE_RETRIES);
-            send_queue_len--;
-            if (send_queue_len > 0) {
-              memmove(&send_queue[0], &send_queue[1], send_queue_len * sizeof(Frame));
-            }
+            __sync_synchronize();  // Memory barrier
+            send_queue_tail = (tail + 1) % FRAME_QUEUE_SIZE;
           } else {
-            BLE_DEBUG_PRINTLN("writeBytes failed, retry %u/%u", (unsigned)send_queue[0].retry_count, (unsigned)MAX_WRITE_RETRIES);
+            BLE_DEBUG_PRINTLN("writeBytes failed, retry %u/%u", (unsigned)send_queue[tail].retry_count, (unsigned)MAX_WRITE_RETRIES);
+            __sync_synchronize();  // Memory barrier
           }
         }
-        sd_nvic_critical_region_exit(nrf_nvic_state);
       }
     }
   }
   
-  // Check receive queue
-  sd_nvic_critical_region_enter(&nrf_nvic_state);
-  if (recv_queue_len > 0) {
-    size_t len = recv_queue[0].len;
-    memcpy(dest, recv_queue[0].buf, len);
+  // Check receive queue - lock-free ring buffer (ISR writes, we read)
+  uint8_t recv_tail = recv_queue_tail;
+  uint8_t recv_head = recv_queue_head;
+  __sync_synchronize();  // Memory barrier - ensure we see latest head from ISR
+  
+  if (recv_tail != recv_head) {
+    // Copy frame data
+    size_t len = recv_queue[recv_tail].len;
+    memcpy(dest, recv_queue[recv_tail].buf, len);
     
-    recv_queue_len--;
-    if (recv_queue_len > 0) {
-      memmove(&recv_queue[0], &recv_queue[1], recv_queue_len * sizeof(Frame));
-    }
-    sd_nvic_critical_region_exit(nrf_nvic_state);
+    // Advance tail pointer
+    __sync_synchronize();  // Memory barrier - ensure copy completes before tail update
+    recv_queue_tail = (recv_tail + 1) % FRAME_QUEUE_SIZE;
     
     BLE_DEBUG_PRINTLN("readBytes: sz=%zu, hdr=%u", len, (unsigned)dest[0]);
     return len;
   }
-  sd_nvic_critical_region_exit(nrf_nvic_state);
   
   return 0;
 }
@@ -318,12 +304,14 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
     return;
   }
   
-  uint8_t nrf_nvic_state;
-  sd_nvic_critical_region_enter(&nrf_nvic_state);
-  
-  // Read all available data into queue
+  // Lock-free: ISR writes to recv queue
   while (instance->bleuart.available() > 0) {
-    if (instance->recv_queue_len >= FRAME_QUEUE_SIZE) {
+    uint8_t head = instance->recv_queue_head;
+    uint8_t tail = instance->recv_queue_tail;
+    __sync_synchronize();  // Memory barrier
+    
+    uint8_t next_head = (head + 1) % FRAME_QUEUE_SIZE;
+    if (next_head == tail) {
       // Queue full - drain remaining data to prevent overflow
       while (instance->bleuart.available() > 0) {
         instance->bleuart.read();
@@ -335,12 +323,13 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
     int avail = instance->bleuart.available();
     int read_len = avail > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : avail;
     
-    instance->recv_queue[instance->recv_queue_len].len = read_len;
-    instance->bleuart.readBytes(instance->recv_queue[instance->recv_queue_len].buf, read_len);
-    instance->recv_queue_len++;
+    instance->recv_queue[head].len = read_len;
+    instance->bleuart.readBytes(instance->recv_queue[head].buf, read_len);
+    
+    // Atomically update head pointer
+    __sync_synchronize();  // Memory barrier - ensure data is written before head update
+    instance->recv_queue_head = next_head;
   }
-  
-  sd_nvic_critical_region_exit(nrf_nvic_state);
 }
 
 bool SerialBLEInterface::isConnected() const {
@@ -348,9 +337,10 @@ bool SerialBLEInterface::isConnected() const {
 }
 
 bool SerialBLEInterface::isWriteBusy() const {
-  uint8_t nrf_nvic_state;
-  sd_nvic_critical_region_enter(&nrf_nvic_state);
-  bool busy = send_queue_len >= FRAME_QUEUE_SIZE;
-  sd_nvic_critical_region_exit(nrf_nvic_state);
-  return busy;
+  // Lock-free: check queue size
+  uint8_t head = send_queue_head;
+  uint8_t tail = send_queue_tail;
+  __sync_synchronize();  // Memory barrier
+  uint8_t size = getQueueSize(head, tail, FRAME_QUEUE_SIZE);
+  return size >= FRAME_QUEUE_SIZE;
 }
