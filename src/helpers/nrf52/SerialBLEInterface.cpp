@@ -219,7 +219,6 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 
     // Write frame data
     send_queue[head].len = len;
-    send_queue[head].retry_count = 0;
     memcpy(send_queue[head].buf, src, len);
     
     // Atomically update head pointer
@@ -252,26 +251,25 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
           __sync_synchronize();  // Memory barrier
           send_queue_tail = (tail + 1) % FRAME_QUEUE_SIZE;
         } else {
-          // Partial write - retry whole frame next time (lock-free: can't modify in place)
-          BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%zu of %u, will retry whole frame", written, (unsigned)frame_to_send.len);
-          // Frame stays in queue, will be retried on next call
+          // Partial write - drop frame immediately, let app handle retransmission
+          BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%zu of %u, dropping frame", written, (unsigned)frame_to_send.len);
           __sync_synchronize();  // Memory barrier
+          send_queue_tail = (tail + 1) % FRAME_QUEUE_SIZE;
         }
       } else {
-        // Write failed - check connection and handle retries
+        // Write failed - check connection
         bool still_connected = isConnected();
         if (still_connected) {
-          BLE_DEBUG_PRINTLN("writeBytes failed (buffer full?), will retry");
+          // Still connected but write failed (buffer full?) - drop frame immediately
+          // No retries to avoid messing with sync status display
+          BLE_DEBUG_PRINTLN("writeBytes failed (buffer full?), dropping frame");
+          __sync_synchronize();  // Memory barrier
+          send_queue_tail = (tail + 1) % FRAME_QUEUE_SIZE;
         } else {
-          send_queue[tail].retry_count++;
-          if (send_queue[tail].retry_count >= MAX_WRITE_RETRIES) {
-            BLE_DEBUG_PRINTLN("writeBytes failed after %u retries, dropping frame", (unsigned)MAX_WRITE_RETRIES);
-            __sync_synchronize();  // Memory barrier
-            send_queue_tail = (tail + 1) % FRAME_QUEUE_SIZE;
-          } else {
-            BLE_DEBUG_PRINTLN("writeBytes failed, retry %u/%u", (unsigned)send_queue[tail].retry_count, (unsigned)MAX_WRITE_RETRIES);
-            __sync_synchronize();  // Memory barrier
-          }
+          // Disconnected - drop frame immediately
+          BLE_DEBUG_PRINTLN("writeBytes failed (disconnected), dropping frame");
+          __sync_synchronize();  // Memory barrier
+          send_queue_tail = (tail + 1) % FRAME_QUEUE_SIZE;
         }
       }
     }

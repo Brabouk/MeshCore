@@ -14,12 +14,10 @@ class SerialBLEInterface : public BaseSerialInterface {
 
   struct Frame {
     uint8_t len;
-    uint8_t retry_count;
     uint8_t buf[MAX_FRAME_SIZE];
   };
 
   #define FRAME_QUEUE_SIZE  8
-  #define MAX_WRITE_RETRIES 3
   
   // Lock-free ring buffers - volatile for ISR safety
   volatile uint8_t send_queue_head;  // Write index (main thread)
