@@ -41,6 +41,9 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
         conn->connected()) {
       instance->_isDeviceConnected = true;
       
+      // Flush any stale TX data from previous connection
+      instance->bleuart.flushTXD();
+      
       ble_gap_conn_params_t conn_params;
       conn_params.min_conn_interval = 12;   // 15ms
       conn_params.max_conn_interval = 24;   // 30ms
@@ -244,28 +247,41 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   // Check connection is valid before attempting write
-  if (_conn_handle != BLE_CONN_HANDLE_INVALID && 
-      Bluefruit.Connection(_conn_handle) != nullptr &&
-      isConnected() && 
-      send_queue_len > 0) {
-    Frame frame_to_send = send_queue[0];
-    
-    size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
-    if (written > 0) {
-      if (written == frame_to_send.len) {
-        BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
-      } else {
-        BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%u of %u, dropping frame", (unsigned)written, (unsigned)frame_to_send.len);
-      }
-      // Only dequeue on successful write to prevent rapid buffer fillup
-      send_queue_len--;
-      for (uint8_t i = 0; i < send_queue_len; i++) {
-        send_queue[i] = send_queue[i + 1];
-      }
+  if (send_queue_len > 0) {
+    if (!isConnected()) {
+      // Connection is invalid, clear send queue to prevent further attempts
+      BLE_DEBUG_PRINTLN("writeBytes: connection invalid, clearing send queue");
+      send_queue_len = 0;
     } else {
-      // bleuart.write() returns 0 if connection is invalid or buffer full
-      // Don't dequeue - keep frame for retry to prevent data loss
-      BLE_DEBUG_PRINTLN("writeBytes failed (disconnected or buffer full), keeping frame for retry");
+      Frame frame_to_send = send_queue[0];
+      
+      size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
+      if (written > 0) {
+        if (written == frame_to_send.len) {
+          BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
+        } else {
+          BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%u of %u, dropping frame", (unsigned)written, (unsigned)frame_to_send.len);
+        }
+        // Only dequeue on successful write to prevent rapid buffer fillup
+        send_queue_len--;
+        for (uint8_t i = 0; i < send_queue_len; i++) {
+          send_queue[i] = send_queue[i + 1];
+        }
+      } else {
+        // bleuart.write() returns 0 if connection is invalid or buffer full
+        // Re-check connection state - if disconnected, drop frame; if buffer full, keep for retry
+        if (!isConnected()) {
+          // Connection lost - drop frame (no point keeping it)
+          BLE_DEBUG_PRINTLN("writeBytes failed: connection lost, dropping frame");
+          send_queue_len--;
+          for (uint8_t i = 0; i < send_queue_len; i++) {
+            send_queue[i] = send_queue[i + 1];
+          }
+        } else {
+          // Buffer full - keep frame for retry (checkRecvFrame() will be called again)
+          BLE_DEBUG_PRINTLN("writeBytes failed (buffer full), keeping frame for retry");
+        }
+      }
     }
   }
   
@@ -290,13 +306,9 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
     return;
   }
   
-  // Validate: handle must match AND connection must exist and be connected AND secured
+  // Validate: handle must match AND connection must be secured
   // This prevents processing data from stale connections with the same handle number
-  BLEConnection* conn = Bluefruit.Connection(conn_handle);
-  if (instance->_conn_handle != conn_handle || 
-      !instance->_isDeviceConnected ||
-      conn == nullptr || 
-      !conn->connected()) {
+  if (instance->_conn_handle != conn_handle || !instance->isConnected()) {
     // Discard data from wrong connection, unsecured connection, or stale connection
     while (instance->bleuart.available() > 0) {
       instance->bleuart.read();
