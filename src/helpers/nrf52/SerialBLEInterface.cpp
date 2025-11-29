@@ -41,9 +41,6 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
         conn->connected()) {
       instance->_isDeviceConnected = true;
       
-      // Flush any stale TX data from previous connection
-      instance->bleuart.flushTXD();
-      
       ble_gap_conn_params_t conn_params;
       conn_params.min_conn_interval = 12;   // 15ms
       conn_params.max_conn_interval = 24;   // 30ms
