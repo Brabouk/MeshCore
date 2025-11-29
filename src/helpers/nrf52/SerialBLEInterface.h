@@ -11,31 +11,20 @@ class SerialBLEInterface : public BaseSerialInterface {
   BLEUart bleuart;
   bool _isEnabled;
   bool _isDeviceConnected;  // Only true after security established (onSecured)
+  uint16_t _conn_handle;    // Current connection handle (BLE_CONN_HANDLE_INVALID when disconnected)
 
   struct Frame {
     uint8_t len;
     uint8_t buf[MAX_FRAME_SIZE];
   };
 
-  #define FRAME_QUEUE_SIZE  8
+  #define FRAME_QUEUE_SIZE  12
   
-  // Lock-free ring buffers - volatile for ISR safety
-  volatile uint8_t send_queue_head;  // Write index (main thread)
-  volatile uint8_t send_queue_tail;  // Read index (main thread, but ISR-safe reads)
+  uint8_t send_queue_len;
   Frame send_queue[FRAME_QUEUE_SIZE];
   
-  volatile uint8_t recv_queue_head;  // Write index (ISR)
-  volatile uint8_t recv_queue_tail;  // Read index (main thread)
+  uint8_t recv_queue_len;
   Frame recv_queue[FRAME_QUEUE_SIZE];
-  
-  // Helper to get queue size without critical section
-  static inline uint8_t getQueueSize(uint8_t head, uint8_t tail, uint8_t size) {
-    if (head >= tail) {
-      return head - tail;
-    } else {
-      return size - tail + head;
-    }
-  }
 
   void clearBuffers();
   static void onConnect(uint16_t connection_handle);
@@ -50,10 +39,9 @@ public:
   SerialBLEInterface() {
     _isEnabled = false;
     _isDeviceConnected = false;
-    send_queue_head = 0;
-    send_queue_tail = 0;
-    recv_queue_head = 0;
-    recv_queue_tail = 0;
+    _conn_handle = BLE_CONN_HANDLE_INVALID;
+    send_queue_len = 0;
+    recv_queue_len = 0;
   }
 
   void begin(const char* device_name, uint32_t pin_code);
