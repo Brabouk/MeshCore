@@ -10,7 +10,7 @@ void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   if (instance) {
     instance->_conn_handle = connection_handle;
     instance->_isDeviceConnected = false;  // Wait for onSecured() before allowing data
-    instance->bleuart.flush();  // Clear any stale data from previous connection
+    instance->clearBuffers();  // Clear queues and BLEUart FIFO to prevent stale data
   }
 }
 
