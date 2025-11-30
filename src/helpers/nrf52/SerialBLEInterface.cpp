@@ -1,47 +1,46 @@
 #include "SerialBLEInterface.h"
+#include <stdio.h>
 #include <string.h>
 #include "ble_gap.h"
 #include "ble_hci.h"
 
 static SerialBLEInterface* instance = nullptr;
 
+// Handles BLE connection establishment, stores handle and clears buffers
 void SerialBLEInterface::onConnect(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: connected handle=0x%04X", connection_handle);
   if (instance) {
     instance->_conn_handle = connection_handle;
-    instance->_isDeviceConnected = false;  // Wait for onSecured() before allowing data
-    instance->clearBuffers();  // Clear queues and BLEUart FIFO to prevent stale data
+    instance->_isDeviceConnected = false;
+    instance->clearBuffers();
   }
 }
 
+// Handles BLE disconnection, resets connection state and clears buffers
 void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disconnected handle=0x%04X reason=%u", connection_handle, (unsigned)reason);
   if (instance) {
-    // Only process if this is our tracked connection (handle matches)
-    // Note: Handle numbers can be reused, but Bluefruit deletes the connection object on disconnect,
-    // so stale callbacks won't have a valid connection object
     if (instance->_conn_handle == connection_handle) {
       instance->_conn_handle = BLE_CONN_HANDLE_INVALID;
       instance->_isDeviceConnected = false;
-      instance->clearBuffers();  // This also flushes BLEUart FIFO
+      instance->clearBuffers();
     }
   }
 }
 
+// Handles security establishment after pairing, enables data transfer and updates connection parameters
 void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: onSecured handle=0x%04X", connection_handle);
   if (instance) {
-    // Validate: handle must match AND we must be waiting for security (_isDeviceConnected == false)
-    // AND connection object must exist and be connected
-    // This prevents stale callbacks from old connections with the same handle number
     if (instance->isValidConnection(connection_handle, true)) {
       instance->_isDeviceConnected = true;
       
+      // Connection interval units: 1.25ms, supervision timeout units: 10ms
       ble_gap_conn_params_t conn_params;
-      conn_params.min_conn_interval = 12;   // 15ms
-      conn_params.max_conn_interval = 24;   // 30ms
+      conn_params.min_conn_interval = 12;  // 15ms
+      conn_params.max_conn_interval = 24;  // 30ms
       conn_params.slave_latency = 0;
-      conn_params.conn_sup_timeout = 200;   // 2s
+      conn_params.conn_sup_timeout = 200;  // 2000ms
       
       uint32_t err_code = sd_ble_gap_conn_param_update(connection_handle, &conn_params);
       if (err_code == NRF_SUCCESS) {
@@ -55,6 +54,7 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   }
 }
 
+// Handles pairing passkey request, always accepts
 bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t const passkey[6], bool match_request) {
   (void)connection_handle;
   (void)passkey;
@@ -62,14 +62,10 @@ bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t co
   return true;
 }
 
+// Handles pairing completion, disconnects on failure to prevent stuck connections
 void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t auth_status) {
-  // Critical: This handles pairing failures (e.g., wrong PIN) to prevent stuck BLE connections.
-  // If pairing fails, onSecured() is never called, so _isDeviceConnected stays false and data
-  // is blocked. However, the BLE link layer connection may still be active. Without disconnecting
-  // here, the connection would be stuck: connected at link layer but unusable.
   BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing complete handle=0x%04X status=%u", connection_handle, (unsigned)auth_status);
   if (instance) {
-    // Validate: handle must match AND connection object must exist and be connected
     if (instance->isValidConnection(connection_handle)) {
       if (auth_status == BLE_GAP_SEC_STATUS_SUCCESS) {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing successful");
@@ -83,12 +79,12 @@ void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t a
   }
 }
 
+// Handles BLE GAP events, accepts connection parameter update requests
 void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   if (!instance) return;
   
   if (evt->header.evt_id == BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST) {
     uint16_t conn_handle = evt->evt.gap_evt.conn_handle;
-    // Validate: handle must match AND connection object must exist and be connected
     if (instance->isValidConnection(conn_handle)) {
       BLE_DEBUG_PRINTLN("CONN_PARAM_UPDATE_REQUEST: handle=0x%04X, min_interval=%u, max_interval=%u, latency=%u, timeout=%u",
                        conn_handle,
@@ -97,7 +93,7 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
                        (unsigned)evt->evt.gap_evt.params.conn_param_update_request.conn_params.slave_latency,
                        (unsigned)evt->evt.gap_evt.params.conn_param_update_request.conn_params.conn_sup_timeout);
       
-      uint32_t err_code = sd_ble_gap_conn_param_update(conn_handle, NULL);  // NULL = use PPCP
+      uint32_t err_code = sd_ble_gap_conn_param_update(conn_handle, NULL);
       if (err_code == NRF_SUCCESS) {
         BLE_DEBUG_PRINTLN("Accepted CONN_PARAM_UPDATE_REQUEST (using PPCP)");
       } else {
@@ -109,41 +105,24 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   }
 }
 
+// Initializes BLE peripheral with security settings, advertising, and UART service
 void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
-  if (instance != nullptr && instance != this) {
-    BLE_DEBUG_PRINTLN("WARNING: SerialBLEInterface instance already exists, overwriting");
-  }
   instance = this;
-
-  if (device_name == nullptr) {
-    BLE_DEBUG_PRINTLN("ERROR: device_name is NULL");
-    return;
-  }
-  
-  size_t name_len = strlen(device_name);  // Max 31 bytes (BLE_GAP_DEVNAME_NAME_MAX_LEN)
-  if (name_len == 0) {
-    BLE_DEBUG_PRINTLN("ERROR: device_name is empty");
-    return;
-  }
-  if (name_len > 31) {
-    BLE_DEBUG_PRINTLN("ERROR: device_name too long (%u bytes, max 31)", (unsigned)name_len);
-    return;
-  }
 
   char charpin[20];
   snprintf(charpin, sizeof(charpin), "%lu", (unsigned long)pin_code);
-
+  
   // If we want to control BLE LED ourselves, uncomment this:
   // Bluefruit.autoConnLed(false);
-  
   Bluefruit.configPrphBandwidth(BANDWIDTH_MAX);
   Bluefruit.begin();
   
+  // Connection interval units: 1.25ms, supervision timeout units: 10ms
   ble_gap_conn_params_t ppcp_params;
-  ppcp_params.min_conn_interval = 12;   // 15ms
-  ppcp_params.max_conn_interval = 24;   // 30ms
+  ppcp_params.min_conn_interval = 12;  // 15ms
+  ppcp_params.max_conn_interval = 24;  // 30ms
   ppcp_params.slave_latency = 0;
-  ppcp_params.conn_sup_timeout = 200;   // 2s
+  ppcp_params.conn_sup_timeout = 200;  // 2000ms
   
   uint32_t err_code = sd_ble_gap_ppcp_set(&ppcp_params);
   if (err_code == NRF_SUCCESS) {
@@ -173,7 +152,6 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
 
   Bluefruit.Advertising.addFlags(BLE_GAP_ADV_FLAGS_LE_ONLY_GENERAL_DISC_MODE);
   Bluefruit.Advertising.addTxPower();
-
   Bluefruit.Advertising.addService(bleuart);
 
   Bluefruit.ScanResponse.addName();
@@ -185,12 +163,14 @@ void SerialBLEInterface::begin(const char* device_name, uint32_t pin_code) {
 
 }
 
+// Clears send and receive queues and flushes BLEUart FIFO
 void SerialBLEInterface::clearBuffers() {
   send_queue_len = 0;
   recv_queue_len = 0;
-  bleuart.flush();  // Clear BLEUart FIFO (safe: begin() must be called first)
+  bleuart.flush();
 }
 
+// Removes first frame from send queue by shifting remaining frames left
 void SerialBLEInterface::shiftSendQueueLeft() {
   if (send_queue_len > 0) {
     send_queue_len--;
@@ -200,6 +180,7 @@ void SerialBLEInterface::shiftSendQueueLeft() {
   }
 }
 
+// Removes first frame from receive queue by shifting remaining frames left
 void SerialBLEInterface::shiftRecvQueueLeft() {
   if (recv_queue_len > 0) {
     recv_queue_len--;
@@ -209,6 +190,7 @@ void SerialBLEInterface::shiftRecvQueueLeft() {
   }
 }
 
+// Validates connection handle matches tracked connection and optionally requires waiting for security
 bool SerialBLEInterface::isValidConnection(uint16_t handle, bool requireWaitingForSecurity) const {
   if (_conn_handle != handle) {
     return false;
@@ -223,6 +205,7 @@ bool SerialBLEInterface::isValidConnection(uint16_t handle, bool requireWaitingF
   return true;
 }
 
+// Starts BLE advertising
 void SerialBLEInterface::enable() {
   if (_isEnabled) return;
 
@@ -232,12 +215,14 @@ void SerialBLEInterface::enable() {
   Bluefruit.Advertising.start(0);
 }
 
+// Disconnects active BLE connection
 void SerialBLEInterface::disconnect() {
   if (_conn_handle != BLE_CONN_HANDLE_INVALID) {
     sd_ble_gap_disconnect(_conn_handle, BLE_HCI_REMOTE_USER_TERMINATED_CONNECTION);
   }
 }
 
+// Stops advertising and disconnects active connection
 void SerialBLEInterface::disable() {
   _isEnabled = false;
   BLE_DEBUG_PRINTLN("SerialBLEInterface: disable");
@@ -246,6 +231,7 @@ void SerialBLEInterface::disable() {
   Bluefruit.Advertising.stop();
 }
 
+// Queues frame for transmission if connected and queue has space
 size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   if (len > MAX_FRAME_SIZE) {
     BLE_DEBUG_PRINTLN("writeFrame(), frame too big, len=%u", (unsigned)len);
@@ -268,11 +254,10 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   return 0;
 }
 
+// Processes send queue and returns next received frame if available
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
-  // Check connection is valid before attempting write
   if (send_queue_len > 0) {
     if (!isConnected()) {
-      // Connection is invalid, clear send queue to prevent further attempts
       BLE_DEBUG_PRINTLN("writeBytes: connection invalid, clearing send queue");
       send_queue_len = 0;
     } else {
@@ -280,22 +265,16 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
       
       size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
       if (written == frame_to_send.len) {
-        // Full write successful
         BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
         shiftSendQueueLeft();
       } else if (written > 0) {
-        // Partial write - frame is corrupted, drop it
         BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%u of %u, dropping corrupted frame", (unsigned)written, (unsigned)frame_to_send.len);
         shiftSendQueueLeft();
       } else {
-        // bleuart.write() returns 0 if connection is invalid or buffer full
-        // Re-check connection state - if disconnected, drop frame; if buffer full, keep for retry
         if (!isConnected()) {
-          // Connection lost - drop frame (no point keeping it)
           BLE_DEBUG_PRINTLN("writeBytes failed: connection lost, dropping frame");
           shiftSendQueueLeft();
         } else {
-          // Buffer full - keep frame for retry (checkRecvFrame() will be called again)
           BLE_DEBUG_PRINTLN("writeBytes failed (buffer full), keeping frame for retry");
         }
       }
@@ -315,15 +294,13 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   return 0;
 }
 
+// Handles incoming BLE UART data, queues frames and drains overflow
 void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
   if (!instance) {
     return;
   }
   
-  // Validate: handle must match AND connection must be secured
-  // This prevents processing data from stale connections with the same handle number
   if (instance->_conn_handle != conn_handle || !instance->isConnected()) {
-    // Discard data from wrong connection, unsecured connection, or stale connection
     while (instance->bleuart.available() > 0) {
       instance->bleuart.read();
     }
@@ -340,31 +317,30 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
     }
     
     int avail = instance->bleuart.available();
-    int read_len = avail > MAX_FRAME_SIZE ? MAX_FRAME_SIZE : avail;
     
+    if (avail > MAX_FRAME_SIZE) {
+      BLE_DEBUG_PRINTLN("onBleUartRX: WARN: BLE RX overflow, avail=%d, draining all", avail);
+      uint8_t drain_buf[32];
+      while (instance->bleuart.available() > 0) {
+        int chunk = instance->bleuart.available() > 32 ? 32 : instance->bleuart.available();
+        instance->bleuart.readBytes(drain_buf, chunk);
+      }
+      continue;
+    }
+    
+    int read_len = avail;
     instance->recv_queue[instance->recv_queue_len].len = read_len;
     instance->bleuart.readBytes(instance->recv_queue[instance->recv_queue_len].buf, read_len);
     instance->recv_queue_len++;
-    
-    // If overflow detected, drain surplus bytes to prevent frame corruption
-    if (avail > MAX_FRAME_SIZE) {
-      BLE_DEBUG_PRINTLN("onBleUartRX: WARN: BLE RX overflow, avail=%d, draining surplus", avail);
-      int surplus = avail - MAX_FRAME_SIZE;
-      uint8_t drain_buf[32];  // Drain in small chunks
-      while (surplus > 0) {
-        int chunk = surplus > 32 ? 32 : surplus;
-        instance->bleuart.readBytes(drain_buf, chunk);
-        surplus -= chunk;
-      }
-    }
   }
 }
 
+// Checks if connection is established and secured
 bool SerialBLEInterface::isConnected() const {
-  // Only check connection state, not queue state
   return _isDeviceConnected && Bluefruit.connected() > 0;
 }
 
+// Checks if send queue is full
 bool SerialBLEInterface::isWriteBusy() const {
   return send_queue_len >= FRAME_QUEUE_SIZE;
 }

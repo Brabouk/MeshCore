@@ -10,8 +10,8 @@
 class SerialBLEInterface : public BaseSerialInterface {
   BLEUart bleuart;
   bool _isEnabled;
-  bool _isDeviceConnected;  // Only true after security established (onSecured)
-  uint16_t _conn_handle;    // Current connection handle (BLE_CONN_HANDLE_INVALID when disconnected)
+  bool _isDeviceConnected;
+  uint16_t _conn_handle;
 
   struct Frame {
     uint8_t len;
