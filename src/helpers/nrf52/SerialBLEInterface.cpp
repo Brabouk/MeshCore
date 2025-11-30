@@ -36,6 +36,8 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
       instance->_isDeviceConnected = true;
       
       // Connection interval units: 1.25ms, supervision timeout units: 10ms
+      // Apple: "The product will not read or use the parameters in the Peripheral Preferred Connection Parameters characteristic."
+      // So we explicitly set it here to make Android & Apple match
       ble_gap_conn_params_t conn_params;
       conn_params.min_conn_interval = 12;  // 15ms
       conn_params.max_conn_interval = 24;  // 30ms
