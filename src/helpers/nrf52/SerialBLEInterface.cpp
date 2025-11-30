@@ -34,11 +34,7 @@ void SerialBLEInterface::onSecured(uint16_t connection_handle) {
     // Validate: handle must match AND we must be waiting for security (_isDeviceConnected == false)
     // AND connection object must exist and be connected
     // This prevents stale callbacks from old connections with the same handle number
-    BLEConnection* conn = Bluefruit.Connection(connection_handle);
-    if (instance->_conn_handle == connection_handle && 
-        !instance->_isDeviceConnected &&  // Must be waiting for security
-        conn != nullptr && 
-        conn->connected()) {
+    if (instance->isValidConnection(connection_handle, true)) {
       instance->_isDeviceConnected = true;
       
       ble_gap_conn_params_t conn_params;
@@ -67,13 +63,14 @@ bool SerialBLEInterface::onPairingPasskey(uint16_t connection_handle, uint8_t co
 }
 
 void SerialBLEInterface::onPairingComplete(uint16_t connection_handle, uint8_t auth_status) {
+  // Critical: This handles pairing failures (e.g., wrong PIN) to prevent stuck BLE connections.
+  // If pairing fails, onSecured() is never called, so _isDeviceConnected stays false and data
+  // is blocked. However, the BLE link layer connection may still be active. Without disconnecting
+  // here, the connection would be stuck: connected at link layer but unusable.
   BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing complete handle=0x%04X status=%u", connection_handle, (unsigned)auth_status);
   if (instance) {
     // Validate: handle must match AND connection object must exist and be connected
-    BLEConnection* conn = Bluefruit.Connection(connection_handle);
-    if (instance->_conn_handle == connection_handle && 
-        conn != nullptr && 
-        conn->connected()) {
+    if (instance->isValidConnection(connection_handle)) {
       if (auth_status == BLE_GAP_SEC_STATUS_SUCCESS) {
         BLE_DEBUG_PRINTLN("SerialBLEInterface: pairing successful");
       } else {
@@ -92,10 +89,7 @@ void SerialBLEInterface::onBLEEvent(ble_evt_t* evt) {
   if (evt->header.evt_id == BLE_GAP_EVT_CONN_PARAM_UPDATE_REQUEST) {
     uint16_t conn_handle = evt->evt.gap_evt.conn_handle;
     // Validate: handle must match AND connection object must exist and be connected
-    BLEConnection* conn = Bluefruit.Connection(conn_handle);
-    if (instance->_conn_handle == conn_handle && 
-        conn != nullptr && 
-        conn->connected()) {
+    if (instance->isValidConnection(conn_handle)) {
       BLE_DEBUG_PRINTLN("CONN_PARAM_UPDATE_REQUEST: handle=0x%04X, min_interval=%u, max_interval=%u, latency=%u, timeout=%u",
                        conn_handle,
                        (unsigned)evt->evt.gap_evt.params.conn_param_update_request.conn_params.min_conn_interval,
@@ -197,6 +191,38 @@ void SerialBLEInterface::clearBuffers() {
   bleuart.flush();  // Clear BLEUart FIFO (safe: begin() must be called first)
 }
 
+void SerialBLEInterface::shiftSendQueueLeft() {
+  if (send_queue_len > 0) {
+    send_queue_len--;
+    for (uint8_t i = 0; i < send_queue_len; i++) {
+      send_queue[i] = send_queue[i + 1];
+    }
+  }
+}
+
+void SerialBLEInterface::shiftRecvQueueLeft() {
+  if (recv_queue_len > 0) {
+    recv_queue_len--;
+    for (uint8_t i = 0; i < recv_queue_len; i++) {
+      recv_queue[i] = recv_queue[i + 1];
+    }
+  }
+}
+
+bool SerialBLEInterface::isValidConnection(uint16_t handle, bool requireWaitingForSecurity) const {
+  if (_conn_handle != handle) {
+    return false;
+  }
+  BLEConnection* conn = Bluefruit.Connection(handle);
+  if (conn == nullptr || !conn->connected()) {
+    return false;
+  }
+  if (requireWaitingForSecurity && _isDeviceConnected) {
+    return false;  // Already secured, not waiting
+  }
+  return true;
+}
+
 void SerialBLEInterface::enable() {
   if (_isEnabled) return;
 
@@ -253,27 +279,21 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
       Frame frame_to_send = send_queue[0];
       
       size_t written = bleuart.write(frame_to_send.buf, frame_to_send.len);
-      if (written > 0) {
-        if (written == frame_to_send.len) {
-          BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
-        } else {
-          BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%u of %u, dropping frame", (unsigned)written, (unsigned)frame_to_send.len);
-        }
-        // Only dequeue on successful write to prevent rapid buffer fillup
-        send_queue_len--;
-        for (uint8_t i = 0; i < send_queue_len; i++) {
-          send_queue[i] = send_queue[i + 1];
-        }
+      if (written == frame_to_send.len) {
+        // Full write successful
+        BLE_DEBUG_PRINTLN("writeBytes: sz=%u, hdr=%u", (unsigned)frame_to_send.len, (unsigned)frame_to_send.buf[0]);
+        shiftSendQueueLeft();
+      } else if (written > 0) {
+        // Partial write - frame is corrupted, drop it
+        BLE_DEBUG_PRINTLN("writeBytes: partial write, sent=%u of %u, dropping corrupted frame", (unsigned)written, (unsigned)frame_to_send.len);
+        shiftSendQueueLeft();
       } else {
         // bleuart.write() returns 0 if connection is invalid or buffer full
         // Re-check connection state - if disconnected, drop frame; if buffer full, keep for retry
         if (!isConnected()) {
           // Connection lost - drop frame (no point keeping it)
           BLE_DEBUG_PRINTLN("writeBytes failed: connection lost, dropping frame");
-          send_queue_len--;
-          for (uint8_t i = 0; i < send_queue_len; i++) {
-            send_queue[i] = send_queue[i + 1];
-          }
+          shiftSendQueueLeft();
         } else {
           // Buffer full - keep frame for retry (checkRecvFrame() will be called again)
           BLE_DEBUG_PRINTLN("writeBytes failed (buffer full), keeping frame for retry");
@@ -288,10 +308,7 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     
     BLE_DEBUG_PRINTLN("readBytes: sz=%u, hdr=%u", (unsigned)len, (unsigned)dest[0]);
     
-    recv_queue_len--;
-    for (uint8_t i = 0; i < recv_queue_len; i++) {
-      recv_queue[i] = recv_queue[i + 1];
-    }
+    shiftRecvQueueLeft();
     return len;
   }
   

@@ -27,6 +27,9 @@ class SerialBLEInterface : public BaseSerialInterface {
   Frame recv_queue[FRAME_QUEUE_SIZE];
 
   void clearBuffers();
+  void shiftSendQueueLeft();
+  void shiftRecvQueueLeft();
+  bool isValidConnection(uint16_t handle, bool requireWaitingForSecurity = false) const;
   static void onConnect(uint16_t connection_handle);
   static void onDisconnect(uint16_t connection_handle, uint8_t reason);
   static void onSecured(uint16_t connection_handle);
