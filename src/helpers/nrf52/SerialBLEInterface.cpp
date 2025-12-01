@@ -305,8 +305,9 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   }
   
   // Advertising watchdog: periodically check if advertising is running, restart if not
+  // Only run when truly disconnected (no connection handle), not during connection establishment
   unsigned long now = millis();
-  if (_isEnabled && !isConnected()) {
+  if (_isEnabled && !isConnected() && _conn_handle == BLE_CONN_HANDLE_INVALID) {
     if (now - _last_health_check >= BLE_HEALTH_CHECK_INTERVAL) {
       _last_health_check = now;
       
