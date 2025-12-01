@@ -4,6 +4,8 @@
 #include "ble_gap.h"
 #include "ble_hci.h"
 
+#define BLE_HEALTH_CHECK_INTERVAL  10000  // Advertising watchdog check every 10 seconds
+
 static SerialBLEInterface* instance = nullptr;
 
 // Handles BLE connection establishment, stores handle and clears buffers
@@ -207,12 +209,20 @@ bool SerialBLEInterface::isValidConnection(uint16_t handle, bool requireWaitingF
   return true;
 }
 
+// Checks if advertising is currently running (wrapper around SoftDevice call)
+bool SerialBLEInterface::isAdvertising() const {
+  ble_gap_addr_t adv_addr;
+  uint32_t err_code = sd_ble_gap_adv_addr_get(0, &adv_addr);
+  return (err_code == NRF_SUCCESS);
+}
+
 // Starts BLE advertising
 void SerialBLEInterface::enable() {
   if (_isEnabled) return;
 
   _isEnabled = true;
   clearBuffers();
+  _last_health_check = millis();
 
   Bluefruit.Advertising.start(0);
 }
@@ -231,6 +241,7 @@ void SerialBLEInterface::disable() {
 
   disconnect();
   Bluefruit.Advertising.stop();
+  _last_health_check = 0;
 }
 
 // Queues frame for transmission if connected and queue has space
@@ -291,6 +302,20 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     
     shiftRecvQueueLeft();
     return len;
+  }
+  
+  // Advertising watchdog: periodically check if advertising is running, restart if not
+  unsigned long now = millis();
+  if (_isEnabled && !isConnected()) {
+    if (now - _last_health_check >= BLE_HEALTH_CHECK_INTERVAL) {
+      _last_health_check = now;
+      
+      if (!isAdvertising()) {
+        // Advertising is not running, restart it
+        BLE_DEBUG_PRINTLN("SerialBLEInterface: advertising watchdog - advertising stopped, restarting");
+        Bluefruit.Advertising.start(0);
+      }
+    }
   }
   
   return 0;

@@ -12,6 +12,7 @@ class SerialBLEInterface : public BaseSerialInterface {
   bool _isEnabled;
   bool _isDeviceConnected;
   uint16_t _conn_handle;
+  unsigned long _last_health_check;
 
   struct Frame {
     uint8_t len;
@@ -30,6 +31,7 @@ class SerialBLEInterface : public BaseSerialInterface {
   void shiftSendQueueLeft();
   void shiftRecvQueueLeft();
   bool isValidConnection(uint16_t handle, bool requireWaitingForSecurity = false) const;
+  bool isAdvertising() const;  // Wrapper to check if advertising is running
   static void onConnect(uint16_t connection_handle);
   static void onDisconnect(uint16_t connection_handle, uint8_t reason);
   static void onSecured(uint16_t connection_handle);
@@ -43,6 +45,7 @@ public:
     _isEnabled = false;
     _isDeviceConnected = false;
     _conn_handle = BLE_CONN_HANDLE_INVALID;
+    _last_health_check = 0;
     send_queue_len = 0;
     recv_queue_len = 0;
   }
