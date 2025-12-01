@@ -368,7 +368,7 @@ bool SerialBLEInterface::isConnected() const {
   return _isDeviceConnected && Bluefruit.connected() > 0;
 }
 
-// Checks if send queue is full
+// Checks if send queue is full (with headroom to prevent race conditions)
 bool SerialBLEInterface::isWriteBusy() const {
-  return send_queue_len >= FRAME_QUEUE_SIZE;
+  return send_queue_len >= (FRAME_QUEUE_SIZE - 1);
 }
