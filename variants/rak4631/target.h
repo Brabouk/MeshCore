@@ -7,6 +7,7 @@
 #include <helpers/radiolib/CustomSX1262Wrapper.h>
 #include <helpers/AutoDiscoverRTCClock.h>
 #include <helpers/sensors/EnvironmentSensorManager.h>
+#include <helpers/ui/SH1106Display.h>
 
 #ifdef DISPLAY_CLASS
   #include <helpers/ui/SSD1306Display.h>
