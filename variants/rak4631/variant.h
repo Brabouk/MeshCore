@@ -106,11 +106,11 @@ extern "C"
 
 // Power management boot protection threshold (millivolts)
 // Set to 0 to disable boot protection
-#define PWRMGT_VOLTAGE_BOOTLOCK 1700   // Won't boot below this voltage (mV) //puvodni hodnota 3300 !!!
+#define PWRMGT_VOLTAGE_BOOTLOCK 2200   // Won't boot below this voltage (mV) //puvodni hodnota 3300 !!!
 // LPCOMP wake configuration (voltage recovery from SYSTEMOFF)
 // AIN3 = P0.05 = PIN_A0 / PIN_VBAT_READ
 #define PWRMGT_LPCOMP_AIN 3
-#define PWRMGT_LPCOMP_REFSEL 4  // 5/8 VDD (~3.13-3.44V)
+#define PWRMGT_LPCOMP_REFSEL 11  // 5/8 VDD (~3.13-3.44V)
 
 // Other pins
 #define PIN_AREF (2)
