@@ -110,7 +110,7 @@ extern "C"
 // LPCOMP wake configuration (voltage recovery from SYSTEMOFF)
 // AIN3 = P0.05 = PIN_A0 / PIN_VBAT_READ
 #define PWRMGT_LPCOMP_AIN 3
-#define PWRMGT_LPCOMP_REFSEL 11  // 5/8 VDD (~3.13-3.44V)
+#define PWRMGT_LPCOMP_REFSEL 4  // 5/8 VDD (~3.13-3.44V) //refsel 11 odpovida cca 2.5V
 
 // Other pins
 #define PIN_AREF (2)
